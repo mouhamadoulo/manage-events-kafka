@@ -36,6 +36,7 @@ Versions vérifiées sur Maven Central / Docker Hub le **2026-11-21**. Ne pas le
 - **Saga chorégraphiée**, pas d'orchestrateur central (pas de Camunda / Temporal).
 - **Outbox transactionnel** pour toute publication issue d'un changement d'état en base.
 - Projet **Maven multi-module**, un module = un service déployable.
+- **Tout port publié par Docker est lié à `127.0.0.1`.** L'infra locale est entièrement en PLAINTEXT, sans authentification, et Kafka UI tourne avec `DYNAMIC_CONFIG_ENABLED`. Sans bind loopback, n'importe quelle machine du réseau local pourrait lire et écrire dans les topics. Ne jamais republier un port sur `0.0.0.0` — l'authentification arrive en phase 12.
 
 ---
 

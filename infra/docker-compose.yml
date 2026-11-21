@@ -1,8 +1,11 @@
 # Infra locale du laboratoire EDA.
 # Kafka 4.4.0 en mode KRaft (aucun ZooKeeper : supprime depuis Kafka 4.0).
 #
-# Identifiants Postgres volontairement triviaux : environnement de dev local uniquement,
-# jamais reutilises ailleurs. Ne pas transposer tel quel hors du poste de travail.
+# Securite : tous les ports publies sont lies a 127.0.0.1. Ni le broker, ni Postgres,
+# ni le Schema Registry, ni l'UI n'exigent d'authentification ici (PLAINTEXT partout) :
+# sans le bind loopback, n'importe quelle machine du reseau local pourrait lire et ecrire
+# dans les topics. Les identifiants Postgres triviaux ne valent que pour ce poste.
+# SASL/SCRAM + TLS + ACLs sont traites en phase 12 (P12-T4, P12-T5).
 #
 #   docker compose -f infra/docker-compose.yml up -d
 #   docker compose -f infra/docker-compose.yml down -v
@@ -16,7 +19,8 @@ services:
     container_name: kafka
     ports:
       # Seul port expose a l'hote : les clients Spring se connectent sur localhost:9092.
-      - "9092:9092"
+      # Bind sur 127.0.0.1 : aucun listener PLAINTEXT accessible depuis le reseau local.
+      - "127.0.0.1:9092:9092"
     environment:
       # --- Identite du noeud KRaft -------------------------------------------------
       # Mode "combined" : ce noeud est a la fois broker et controller. Acceptable en dev,
@@ -69,7 +73,7 @@ services:
       kafka:
         condition: service_healthy
     ports:
-      - "8081:8081"
+      - "127.0.0.1:8081:8081"
     environment:
       SCHEMA_REGISTRY_HOST_NAME: schema-registry
       SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
@@ -93,19 +97,21 @@ services:
       kafka:
         condition: service_healthy
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     environment:
       KAFKA_CLUSTERS_0_NAME: local
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:19092
       KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://schema-registry:8081
       # Permet de creer topics / produire des messages depuis l'UI (pratique pour les experiences).
+      # Equivaut a une console d'admin sans authentification : acceptable uniquement parce que
+      # le port n'ecoute que sur 127.0.0.1. Ne jamais exposer ce service tel quel.
       DYNAMIC_CONFIG_ENABLED: "true"
 
   postgres:
     image: postgres:18-alpine
     container_name: postgres
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     environment:
       POSTGRES_USER: eda
       POSTGRES_PASSWORD: eda
