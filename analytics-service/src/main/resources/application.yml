@@ -1,0 +1,22 @@
+spring:
+  application:
+    name: analytics-service
+  kafka:
+    # Listener EXTERNAL du broker : annonce localhost:9092 (cf. infra/docker-compose.yml).
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      # earliest en dev : un nouveau consumer group rejoue tout l'historique du topic.
+      # Defaut Kafka = latest, qui masquerait les messages deja publies.
+      auto-offset-reset: earliest
+
+server:
+  port: 8096
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: always

@@ -1,0 +1,54 @@
+# Maven
+target/
+!.mvn/wrapper/maven-wrapper.jar
+!.mvn/wrapper/maven-wrapper.properties
+.mvn/timing.properties
+.mvn/wrapper/maven-wrapper.jar
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+pom.xml.next
+release.properties
+dependency-reduced-pom.xml
+buildNumber.properties
+
+# IDE — IntelliJ
+.idea/
+*.iml
+*.ipr
+*.iws
+out/
+
+# IDE — Eclipse / VS Code
+.classpath
+.project
+.settings/
+.apt_generated/
+bin/
+.vscode/
+.factorypath
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs & runtime
+*.log
+logs/
+*.pid
+hs_err_pid*
+replay_pid*
+
+# Secrets / env locaux
+.env
+.env.local
+*.local.yml
+
+# Kafka Streams state stores locaux
+/kafka-streams-state/
+**/kafka-streams-state/
+/tmp/kafka-streams/
+
+# Données Docker montées localement
+infra/data/
