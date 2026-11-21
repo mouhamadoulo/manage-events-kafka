@@ -77,7 +77,10 @@ services:
     environment:
       SCHEMA_REGISTRY_HOST_NAME: schema-registry
       SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
-      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: INTERNAL://kafka:19092
+      # Le prefixe est un PROTOCOLE DE SECURITE, pas un nom de listener : il doit correspondre
+      # a kafkastore.security.protocol (PLAINTEXT par defaut). Mettre "INTERNAL://" echoue avec
+      # "No supported Kafka endpoints are configured". Le port 19092 cible bien le listener INTERNAL.
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://kafka:19092
       SCHEMA_REGISTRY_KAFKASTORE_TOPIC: _schemas
       SCHEMA_REGISTRY_KAFKASTORE_TOPIC_REPLICATION_FACTOR: 1
       # Compatibilite BACKWARD globale : un nouveau schema doit pouvoir lire les anciens messages.
@@ -117,7 +120,11 @@ services:
       POSTGRES_PASSWORD: eda
       POSTGRES_DB: postgres
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      # Postgres 18+ : le montage doit etre sur /var/lib/postgresql, PAS sur .../data.
+      # L'image place alors les donnees dans un sous-dossier nomme par version majeure,
+      # ce qui permet pg_upgrade --link. Monter .../data fait echouer le demarrage.
+      # Voir docker-library/postgres#1259.
+      - postgres-data:/var/lib/postgresql
       # Cree une base par service au premier demarrage (volume vide uniquement).
       - ./postgres/init-databases.sh:/docker-entrypoint-initdb.d/init-databases.sh:ro
     healthcheck:

@@ -21,7 +21,7 @@ Convention d'ID : `P<phase>-T<tâche>`. Les tâches se réfèrent par leur ID da
 
 | Phase | Thème | Tâches | Fait | État |
 |---|---|---|---|---|
-| 0 | Socle & infra | 9 | 7 | **en cours** |
+| 0 | Socle & infra | 9 | 9 | **terminée** |
 | 1 | Producer / Consumer fondamentaux | 8 | 0 | à faire |
 | 2 | Contrats & JSON Schema | 7 | 0 | à faire |
 | 3 | Fiabilité producer | 6 | 0 | à faire |
@@ -35,7 +35,7 @@ Convention d'ID : `P<phase>-T<tâche>`. Les tâches se réfèrent par leur ID da
 | 11 | Observabilité & exploitation | 8 | 0 | à faire |
 | 12 | Prod-readiness & sécurité | 7 | 0 | à faire |
 | 13 | Synthèse & restitution | 5 | 0 | à faire |
-| | **Total** | **104** | **7** | |
+| | **Total** | **104** | **9** | |
 
 ---
 
@@ -53,10 +53,19 @@ Objectif : un broker KRaft qui tourne, un build multi-module qui passe, de quoi 
       *Vérif* : `./mvnw -N validate`.
 - [x] **P0-T4** Maven wrapper 3.9.13 committé.
       *Vérif* : `./mvnw -version`.
-- [ ] **P0-T5** `infra/docker-compose.yml` : `apache/kafka:4.4.0` en **KRaft** mono-nœud, `confluentinc/cp-schema-registry:8.4.1`, `kafbat/kafka-ui:v1.5.1`, `postgres:18-alpine`.
-      *Vérif* : `docker compose ps` → 4 services `healthy`.
-- [ ] **P0-T6** Script `infra/topics/create-topics.sh` : tous les topics du tableau de CLAUDE.md §2, partitions et politique de nettoyage incluses.
-      *Vérif* : `kafka-topics.sh --describe --bootstrap-server localhost:9092`.
+- [x] **P0-T5** `infra/docker-compose.yml` : `apache/kafka:4.4.0` en **KRaft** mono-nœud, `confluentinc/cp-schema-registry:8.4.1`, `kafbat/kafka-ui:v1.5.1`, `postgres:18-alpine`.
+      *Vérif* : `docker compose up -d --wait` → **4 services healthy**. Schema Registry répond
+      `compatibilityLevel = BACKWARD`, Kafka UI renvoie HTTP 200, Postgres expose les 5 bases
+      (`orders`, `payments`, `inventory`, `shipping`, `notifications`).
+      Deux corrections nécessaires, documentées dans CLAUDE.md §5 : volume Postgres 18 sur
+      `/var/lib/postgresql` (et non `.../data`), et préfixe `PLAINTEXT://` — non `INTERNAL://` —
+      pour `SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS`.
+- [x] **P0-T6** Script `infra/topics/create-topics.sh` : tous les topics du tableau de CLAUDE.md §2, partitions et politique de nettoyage incluses.
+      *Vérif* : **17 topics créés**. `--describe` confirme
+      `shop.order.events.v1` → `PartitionCount: 3, cleanup.policy=delete, retention.ms=604800000`
+      et `shop.order.store.v1` → `PartitionCount: 3, cleanup.policy=compact`.
+      Variante PowerShell fournie (`create-topics.ps1`). Piège Git Bash corrigé :
+      `MSYS_NO_PATHCONV=1`, sinon `docker exec` sort en 127 (cf. CLAUDE.md §5).
 - [x] **P0-T7** Modules vides `common-events`, `common-kafka` + squelettes des 6 services, chacun avec Actuator et son port.
       *Vérif* : `./mvnw clean verify` → **BUILD SUCCESS**, 9 modules, 6 tests de contexte verts
       (`Tests run: 1, Failures: 0, Errors: 0` par service), 6 jars Boot produits.
@@ -273,4 +282,5 @@ Objectif : ce qui séparerait ce labo d'un vrai déploiement.
 |---|---|---|---|
 | 2026-11-21 | — | — | Création du repo : CLAUDE.md, README.md, TASKS.md. Versions de la stack vérifiées sur Maven Central et Docker Hub. |
 | 2026-11-21 | 0 | P0-T1 à T4, T7 à T9 | Socle en place : git, parent POM, wrapper 3.9.13, 9 modules, ADR-001, fiche pattern 00. `./mvnw clean verify` vert sous JDK 25.0.2+10. |
-| 2026-11-21 | 0 | P0-T5, P0-T6 | Compose et scripts de topics écrits mais **non vérifiés** : le daemon Docker Desktop répond `500 Internal Server Error` pendant le pull de `cp-schema-registry:8.4.1`. À relancer. |
+| 2026-11-21 | 0 | P0-T5, P0-T6 | Infra vérifiée après redémarrage de Docker Desktop : 4 conteneurs healthy, 17 topics créés avec les bonnes politiques de nettoyage, 5 bases Postgres. Trois pièges corrigés et documentés (volume Postgres 18, préfixe bootstrap du Schema Registry, `MSYS_NO_PATHCONV`). |
+| 2026-11-21 | 0 | — | **Phase 0 terminée (9/9).** Dépôt public : https://github.com/mouhamadoulo/manage-events-kafka |

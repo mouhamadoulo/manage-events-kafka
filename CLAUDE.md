@@ -168,6 +168,10 @@ Ce projet sert à **apprendre**. Donc :
 - **Spring Cloud Stream 5.1.0** : modèle fonctionnel (`java.util.function.Function/Consumer/Supplier`) uniquement. `@StreamListener` / `@EnableBinding` n'existent plus.
 - **Kafka 4.x** : protocole consumer group **KIP-848** par défaut côté broker. Pas de ZooKeeper.
 - **Confluent Schema Registry** absent de Maven Central → déclarer le repo `https://packages.confluent.io/maven/` dans le parent POM.
+- **Postgres 18+** : le volume doit être monté sur `/var/lib/postgresql`, **pas** sur `/var/lib/postgresql/data`. L'image place les données dans un sous-dossier nommé par version majeure (pour `pg_upgrade --link`). Monter `.../data` fait sortir le conteneur en code 1 avec un message sur `pg_ctlcluster`. Tous les exemples antérieurs à Postgres 18 montent `.../data` et sont donc faux ici.
+- **Schema Registry** : `SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS` attend un préfixe de **protocole de sécurité** (`PLAINTEXT://`), pas un nom de listener. `INTERNAL://kafka:19092` échoue avec `No supported Kafka endpoints are configured`, alors que `PLAINTEXT://kafka:19092` cible bien le listener INTERNAL par son port.
+- **Git Bash sur Windows** : MSYS réécrit tout argument commençant par `/` en chemin Windows. `docker exec kafka /opt/kafka/bin/kafka-topics.sh` devient `C:/Program Files/Git/opt/...` et sort en code 127. Remède : `export MSYS_NO_PATHCONV=1` (déjà dans `infra/topics/create-topics.sh`), ou doubler le slash (`//opt/...`). En PowerShell, le problème ne se pose pas.
+- **Pas de `curl` dans les conteneurs** `apache/kafka` ni `cp-schema-registry` (seulement `wget` et `nc` côté Kafka). Interroger le Schema Registry depuis l'hôte (`Invoke-RestMethod http://localhost:8081/subjects`), pas via `docker exec`.
 - **JDK local** : Java 25 est installé à `C:\Users\mouha\Documents\WorkspaceJAVA\1-MesJDKs\MicrosoftOpenJDKs\jdk-25.0.2+10` (Microsoft OpenJDK 25.0.2+10 LTS). Le JDK par défaut du `PATH` est un **21.0.10**, qui échoue avec `error: release version 25 not supported`. Donc : positionner `JAVA_HOME` sur le JDK 25 avant tout build.
 
   ```powershell

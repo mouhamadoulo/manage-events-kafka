@@ -6,6 +6,11 @@
 # Equivalent PowerShell : infra/topics/create-topics.ps1
 set -euo pipefail
 
+# Git Bash / MSYS sur Windows reecrit tout argument commencant par "/" en chemin Windows :
+# "/opt/kafka/bin/kafka-topics.sh" devient "C:/Program Files/Git/opt/..." et docker exec
+# echoue en 127. MSYS_NO_PATHCONV=1 desactive cette conversion. Sans effet sur Linux/macOS.
+export MSYS_NO_PATHCONV=1
+
 CONTAINER="${KAFKA_CONTAINER:-kafka}"
 BOOTSTRAP="${KAFKA_BOOTSTRAP:-localhost:19092}"
 KT="/opt/kafka/bin/kafka-topics.sh"
