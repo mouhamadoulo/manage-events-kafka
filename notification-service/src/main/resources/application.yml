@@ -4,6 +4,8 @@ spring:
   kafka:
     # Listener EXTERNAL du broker : annonce localhost:9092 (cf. infra/docker-compose.yml).
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    properties:
+      schema.registry.url: ${SCHEMA_REGISTRY_URL:http://localhost:8081}
     consumer:
       # Le groupe est l'unite de partage du travail : les partitions d'un topic sont
       # reparties entre les membres d'un MEME groupe. Surchargeable par variable d'env pour
@@ -15,29 +17,27 @@ spring:
       # en etait, quelle que soit cette valeur.
       auto-offset-reset: earliest
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
-      # JacksonJsonDeserializer -> Jackson 3 (tools.jackson). JsonDeserializer -> Jackson 2.
+      # Phase 2 : le message commence par un octet 0 puis l'id du schema sur 4 octets. Ce
+      # deserialiseur lit cet id, va chercher le schema dans le registre, et construit le
+      # type demande ci-dessous. Un JacksonJsonDeserializer nu echouerait sur ces 5 octets.
       #
-      # ATTENTION, faille volontaire de la phase 1 : ce deserialiseur est nu. Un seul message
-      # mal forme dans le topic (un "{" seul, un champ du mauvais type) echoue AVANT que le
-      # listener ne soit appele. Spring ne peut pas committer l'offset, repoll le meme
-      # message, echoue a nouveau : la partition est bloquee pour toujours, par un seul
-      # octet. C'est le poison message, et c'est exactement ce que la phase 4 corrige avec
-      # ErrorHandlingDeserializer (delegation + capture de l'echec) puis DefaultErrorHandler
-      # + DeadLetterPublishingRecoverer. Laisse nu ici pour pouvoir le provoquer et le voir.
-      value-deserializer: org.springframework.kafka.support.serializer.JacksonJsonDeserializer
+      # ATTENTION, faille volontaire de la phase 1 toujours en place : ce deserialiseur est
+      # nu. Un message mal forme echoue AVANT le listener, l'offset n'est jamais commite,
+      # la partition est bloquee. La phase 4 ajoute ErrorHandlingDeserializer puis
+      # DefaultErrorHandler + DeadLetterPublishingRecoverer.
+      value-deserializer: io.confluent.kafka.serializers.json.KafkaJsonSchemaDeserializer
       properties:
-        # Le producteur n'envoie pas de header de type (spring.json.add.type.headers=false),
-        # donc le consumer doit savoir quoi construire. Un seul type ici ; la phase 2
-        # (Schema Registry) et la phase 4 (routage par eventType) traiteront les topics
-        # multi-types.
-        spring.json.value.default.type: com.formation.eda.events.order.OrderPlaced
-        # Defaut : true. A false, un header de type envoye par un producteur mal configure
-        # est ignore. WHY: ce header designe une classe a instancier — le croire, c'est
-        # laisser le producteur choisir le type construit chez le consumer.
-        spring.json.use.type.headers: false
-        # Garde-fou complementaire : meme en cas de header de type, seules ces racines de
-        # package peuvent etre instanciees.
-        spring.json.trusted.packages: com.formation.eda.events
+        # Le type a construire. Le wire format dit QUEL schema a servi, pas quelle classe
+        # Java instancier : les deux informations sont distinctes, et c'est voulu — un
+        # consumer Python lit le meme message sans connaitre ce nom.
+        json.value.type: com.formation.eda.events.order.OrderPlaced
+        # Valide aussi a la lecture : un message hors contrat est refuse au lieu d'etre
+        # silencieusement tronque. Defaut false.
+        json.fail.invalid.schema: true
+        # Defaut true : un champ inconnu fait echouer la deserialisation. A false, un
+        # consumer qui n'a pas encore le nouveau schema ignorerait les champs ajoutes —
+        # c'est ce qui rend l'evolution BACKWARD supportable (cf. P2-T5).
+        json.fail.unknown.properties: false
 
 server:
   port: ${SERVER_PORT:8095}

@@ -39,10 +39,20 @@ spring:
           # implicite (auto.create.topics.enable=false) et les topics sont declares dans
           # infra/topics. On le dit explicitement pour que l'intention soit lisible.
           auto-create-topics: false
+          consumer-properties:
+            schema.registry.url: ${SCHEMA_REGISTRY_URL:http://localhost:8081}
+            # Depuis la phase 2, le payload est precede de l'octet 0 et de l'id du schema.
+            # C'est donc un deserialiseur Kafka qui doit lire le message, pas un
+            # MessageConverter de Spring Messaging : celui-ci verrait 5 octets parasites.
+            value.deserializer: io.confluent.kafka.serializers.json.KafkaJsonSchemaDeserializer
+            json.value.type: com.formation.eda.events.order.OrderPlaced
+            json.fail.invalid.schema: true
+            json.fail.unknown.properties: false
         bindings:
           onOrderPlaced-in-0:
             consumer:
-              # Les evenements ne portent pas de header de type (le producteur envoie
-              # spring.json.add.type.headers=false), donc la conversion se fait sur le type
-              # declare par la signature du Consumer.
-              use-native-decoding: false
+              # A true, le binder laisse le Deserializer Kafka faire la conversion et ne
+              # tente pas la sienne. C'est la difference de fond entre les deux modeles
+              # (cf. ADR-002) : ici il faut la desactiver explicitement pour que le format
+              # Confluent passe.
+              use-native-decoding: true
