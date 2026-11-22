@@ -50,6 +50,17 @@ public class OrderEventsListener {
     @KafkaListener(topics = Topics.ORDER_EVENTS, groupId = "${spring.kafka.consumer.group-id}")
     public void onOrderEvent(ConsumerRecord<String, OrderPlaced> record) {
         OrderPlaced event = record.value();
+
+        // Une valeur nulle est un tombstone : legitime sur un topic compacte (l'event store
+        // de la phase 8 en recevra), aberrant sur un topic d'evenements. Sans ce garde-fou,
+        // c'est une NPE dans le listener — donc un echec de traitement, donc un repoll du
+        // meme message a l'infini une fois le retry en place.
+        if (event == null || event.envelope() == null) {
+            log.warn("ignore un message sans payload exploitable : cle={} partition={} offset={}",
+                    record.key(), record.partition(), record.offset());
+            return;
+        }
+
         countsByPartition.computeIfAbsent(record.partition(), p -> new LongAdder()).increment();
 
         // Ecart entre l'instant du fait metier et l'instant de reception : la latence reelle

@@ -16,6 +16,14 @@ spring:
       auto-offset-reset: earliest
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       # JacksonJsonDeserializer -> Jackson 3 (tools.jackson). JsonDeserializer -> Jackson 2.
+      #
+      # ATTENTION, faille volontaire de la phase 1 : ce deserialiseur est nu. Un seul message
+      # mal forme dans le topic (un "{" seul, un champ du mauvais type) echoue AVANT que le
+      # listener ne soit appele. Spring ne peut pas committer l'offset, repoll le meme
+      # message, echoue a nouveau : la partition est bloquee pour toujours, par un seul
+      # octet. C'est le poison message, et c'est exactement ce que la phase 4 corrige avec
+      # ErrorHandlingDeserializer (delegation + capture de l'echec) puis DefaultErrorHandler
+      # + DeadLetterPublishingRecoverer. Laisse nu ici pour pouvoir le provoquer et le voir.
       value-deserializer: org.springframework.kafka.support.serializer.JacksonJsonDeserializer
       properties:
         # Le producteur n'envoie pas de header de type (spring.json.add.type.headers=false),
