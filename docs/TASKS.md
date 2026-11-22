@@ -24,7 +24,7 @@ Convention d'ID : `P<phase>-T<tâche>`. Les tâches se réfèrent par leur ID da
 | 0 | Socle & infra | 9 | 9 | **terminée** |
 | 1 | Producer / Consumer fondamentaux | 8 | 8 | **terminée** |
 | 2 | Contrats & JSON Schema | 7 | 7 | **terminée** |
-| 3 | Fiabilité producer | 6 | 0 | à faire |
+| 3 | Fiabilité producer | 6 | 6 | **terminée** |
 | 4 | Fiabilité consumer : retry, DLQ, idempotence | 8 | 0 | à faire |
 | 5 | Outbox transactionnel | 6 | 0 | à faire |
 | 6 | Saga chorégraphiée & compensation | 9 | 0 | à faire |
@@ -35,7 +35,7 @@ Convention d'ID : `P<phase>-T<tâche>`. Les tâches se réfèrent par leur ID da
 | 11 | Observabilité & exploitation | 8 | 0 | à faire |
 | 12 | Prod-readiness & sécurité | 8 | 0 | à faire |
 | 13 | Synthèse & restitution | 5 | 0 | à faire |
-| | **Total** | **105** | **24** | |
+| | **Total** | **105** | **30** | |
 
 ---
 
@@ -181,12 +181,42 @@ Objectif : des événements versionnés, validés au broker, qui évoluent sans 
 
 Objectif : savoir exactement ce qu'un `send()` garantit, et ce qu'il ne garantit pas.
 
-- [ ] **P3-T1** `acks=all`, `enable.idempotence=true`, `max.in.flight=5`, `retries` — expliquer chaque valeur en commentaire.
-- [ ] **P3-T2** Gestion du `CompletableFuture` de `send()` : callback d'échec, pas de fire-and-forget silencieux.
-- [ ] **P3-T3** **Expérience perte de message** : `acks=0`, tuer le broker pendant un envoi en rafale, compter les messages perdus.
-- [ ] **P3-T4** **Expérience duplication** : désactiver l'idempotence, forcer un timeout de retry, constater le doublon.
-- [ ] **P3-T5** Tuning `linger.ms` / `batch.size` / `compression.type` ; mesurer le débit avant/après.
-- [ ] **P3-T6** `docs/patterns/03-garanties-producer.md`.
+- [x] **P3-T1** `acks=all`, `enable.idempotence=true`, `max.in.flight=5`, `retries` — expliquer chaque valeur en commentaire.
+      *Vérif* : `order-service/src/main/resources/application.yml`, section `producer` — chaque
+      valeur commentée avec ce qu'elle garantit et ce que valent les autres choix. Deux points
+      notés : sur un labo mono-nœud `acks=all` ne protège de rien (une seule replica), et
+      `max.in.flight=5` ne préserve l'ordre que **grâce** à l'idempotence. Commit `289a516`.
+- [x] **P3-T2** Gestion du `CompletableFuture` de `send()` : callback d'échec, pas de fire-and-forget silencieux.
+      *Vérif* : `publish()` déballe la `CompletionException`, journalise la cause Kafka réelle
+      et lève `EventPublicationFailedException` → **503** avec un message générique.
+      `publishAsync()` impose un `whenComplete`. Commit `289a516`.
+      Durcissement après revue de sécurité : le 503 ne renvoie plus le message du client
+      Kafka, qui nomme l'hôte du broker, celui du registre, le sujet et les timeouts.
+- [x] **P3-T3** **Expérience perte de message** : `acks=0`, tuer le broker pendant un envoi en rafale, compter les messages perdus.
+      *Vérif* : `infra/experiments/p3-t3-perte.ps1`, 200 000 messages, `docker kill` à 4 s.
+      Commit `b641905`.
+      `acks=0` → 7 481 déclarés envoyés, **6 231 dans le topic : 1 250 perdus en silence**.
+      `acks=all` → 62 769 déclarés, 62 769 stockés, **écart nul**, et 3 978 échecs comptés
+      donc visibles.
+- [x] **P3-T4** **Expérience duplication** : désactiver l'idempotence, forcer un timeout de retry, constater le doublon.
+      *Vérif* : `infra/experiments/p3-t4-doublons.ps1`, `request.timeout.ms=5` pour que
+      l'accusé arrive toujours trop tard. Commit `b641905`.
+      Sans idempotence : **47 156 records pour 20 000 `eventId` distincts** (+135,8 %). Avec :
+      20 000 records, 0 doublon.
+      Trois impasses documentées, dont `docker pause` qui ne duplique pas — geler le broker
+      l'empêche aussi bien d'écrire que d'accuser.
+- [x] **P3-T5** Tuning `linger.ms` / `batch.size` / `compression.type` ; mesurer le débit avant/après.
+      *Vérif* : `infra/experiments/p3-t5-debit.ps1`, 3 000 messages, 3 essais, médiane, après
+      échauffement. Commit `289a516`.
+      **Conclusion inverse de celle attendue** : la dispersion entre essais d'un même scénario
+      (11 583 à 26 548 msg/s) dépasse l'écart entre scénarios. Les trois réglages ne sont pas
+      mesurables ici ; seule la validation JSON Schema déplace la médiane (x1,48).
+      Sans échauffement, le scénario de référence tombait à 773 msg/s et **tous les écarts
+      étaient faux**, dans le sens flatteur.
+- [x] **P3-T6** `docs/patterns/03-garanties-producer.md`.
+      *Vérif* : fiche écrite avec les trois mesures, les quatre horloges du producteur
+      (`max.block.ms`, `request.timeout.ms`, `delivery.timeout.ms`, `linger.ms`) et ce que
+      l'idempotence producteur ne couvre pas.
 
 ---
 
@@ -360,4 +390,6 @@ Objectif : ce qui séparerait ce labo d'un vrai déploiement.
 | 2026-11-22 | 1 | P1-T7, P1-T8 | Le même consumer écrit en Spring Cloud Stream 5.1.0 sous profil `cloud-stream` ; décision par module dans ADR-002. Fiche `01-partitions-cles-groupes.md`. **Phase 1 terminée (8/8).** |
 | 2026-11-22 | 2 | P2-T1, P2-T2, P2-T6 | Le contrat devient un fichier JSON Schema versionné, publié via le mécanisme d'enveloppe de Confluent plutôt que dérivé de la classe. Trois défauts de configuration corrigés explicitement (`auto.register.schemas`, `json.fail.invalid.schema`, stratégie de sujet) et le format des dates rétabli en ISO-8601. |
 | 2026-11-22 | 2 | P2-T3, P2-T4 | Enregistrement explicite par script : 4 sujets en `BACKWARD`. Deux pièges PowerShell 5.1 trouvés en route — `ConvertTo-Json` qui se bloque sans rien émettre, et `Get-Content` qui lit en ANSI et double-encodait le contrat publié. |
+| 2026-11-22 | 3 | P3-T1, P3-T2, P3-T5 | Producteur configuré valeur par valeur, résultat du `send()` regardé (503 au lieu d'un échec muet), et outil de rafale du profil `lab`. Le tuning réseau s'est révélé non mesurable sur ce labo : seule la validation du schéma déplace le débit. |
+| 2026-11-22 | 3 | P3-T3, P3-T4, P3-T6 | Les deux pannes mesurées : `acks=0` perd 1 250 records sans un mot, et sans idempotence le réessai écrit +135,8 % de records. Fiche `03-garanties-producer.md`. **Phase 3 terminée (6/6).** |
 | 2026-11-22 | 2 | P2-T5, P2-T7 | Expérience de compatibilité : champ optionnel accepté, champ requis refusé, retrait refusé à cause du modèle de contenu fermé. Trois incidents réels documentés dans la fiche 02. **Phase 2 terminée (7/7).** |

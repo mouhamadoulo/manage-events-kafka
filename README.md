@@ -167,6 +167,22 @@ rejouables dans `infra/experiments/` :
 ./infra/experiments/p1-t7-deux-modeles.ps1
 ```
 
+Les garanties du producteur, elles, se mesurent en cassant quelque chose. Ces trois scripts
+arrêtent ou mettent en pause le broker et purgent `shop.order.events.v1` ; ils demandent
+`order-service` lancé avec `--spring.profiles.active=lab` :
+
+```powershell
+./infra/experiments/p3-t3-perte.ps1
+```
+
+```powershell
+./infra/experiments/p3-t4-doublons.ps1
+```
+
+```powershell
+./infra/experiments/p3-t5-debit.ps1 -Count 3000 -Repeat 3
+```
+
 Les contrats d'événements, eux, vivent dans le Schema Registry. Les publier est un acte
 explicite, et leur évolution se teste avant d'être déployée :
 
