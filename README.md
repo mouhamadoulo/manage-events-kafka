@@ -167,6 +167,17 @@ rejouables dans `infra/experiments/` :
 ./infra/experiments/p1-t7-deux-modeles.ps1
 ```
 
+Les contrats d'événements, eux, vivent dans le Schema Registry. Les publier est un acte
+explicite, et leur évolution se teste avant d'être déployée :
+
+```powershell
+./infra/schemas/register-schemas.ps1
+```
+
+```powershell
+./infra/schemas/p2-t5-evolution.ps1
+```
+
 Ce qu'elles montrent et les mesures relevées : `docs/patterns/`.
 
 ---
@@ -198,7 +209,7 @@ inventory-service/    participant saga, exactly-once
 shipping-service/     participant saga
 notification-service/ consumer terminal idempotent
 analytics-service/    Kafka Streams
-infra/                docker-compose, scripts topics, experiences
+infra/                docker-compose, topics, schemas, experiences
 docs/                 TASKS.md, adr/, patterns/
 ```
 

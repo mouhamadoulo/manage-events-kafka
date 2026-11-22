@@ -23,7 +23,7 @@ Convention d'ID : `P<phase>-T<tâche>`. Les tâches se réfèrent par leur ID da
 |---|---|---|---|---|
 | 0 | Socle & infra | 9 | 9 | **terminée** |
 | 1 | Producer / Consumer fondamentaux | 8 | 8 | **terminée** |
-| 2 | Contrats & JSON Schema | 7 | 0 | à faire |
+| 2 | Contrats & JSON Schema | 7 | 7 | **terminée** |
 | 3 | Fiabilité producer | 6 | 0 | à faire |
 | 4 | Fiabilité consumer : retry, DLQ, idempotence | 8 | 0 | à faire |
 | 5 | Outbox transactionnel | 6 | 0 | à faire |
@@ -35,7 +35,7 @@ Convention d'ID : `P<phase>-T<tâche>`. Les tâches se réfèrent par leur ID da
 | 11 | Observabilité & exploitation | 8 | 0 | à faire |
 | 12 | Prod-readiness & sécurité | 8 | 0 | à faire |
 | 13 | Synthèse & restitution | 5 | 0 | à faire |
-| | **Total** | **105** | **17** | |
+| | **Total** | **105** | **24** | |
 
 ---
 
@@ -132,16 +132,48 @@ Objectif : sentir physiquement partitions, clés, groupes et offsets.
 
 Objectif : des événements versionnés, validés au broker, qui évoluent sans casser les consumers.
 
-- [ ] **P2-T1** JSON Schemas de tous les événements dans `common-events/src/main/resources/schemas/`.
-- [ ] **P2-T2** `KafkaJsonSchemaSerializer` / `Deserializer` 8.4.1 configurés, `auto.register.schemas=false` (enregistrement explicite).
-      *Vérif* : `curl http://localhost:8081/subjects`.
-- [ ] **P2-T3** Enregistrement des schémas au build (plugin Maven ou script), avec stratégie de sujet `TopicRecordNameStrategy`.
-- [ ] **P2-T4** Compatibilité `BACKWARD` imposée sur tous les sujets.
-      *Vérif* : `curl http://localhost:8081/config/<subject>`.
-- [ ] **P2-T5** **Expérience évolution** : ajouter un champ optionnel → passe. Ajouter un champ requis → rejeté. Documenter les deux.
-- [ ] **P2-T6** Résoudre le conflit Jackson 2 / Jackson 3 si les serdes Confluent le déclenchent.
-      *Vérif* : `./mvnw dependency:tree | Select-String jackson`.
-- [ ] **P2-T7** `docs/patterns/02-schema-registry-evolution.md`.
+- [x] **P2-T1** JSON Schemas de tous les événements dans `common-events/src/main/resources/schemas/`.
+      *Vérif* : `OrderPlaced.json` porte les contraintes que le record Java ne sait pas
+      exprimer (`^[A-Z]{3}$` sur la devise, `minItems`, `format: date-time`). Un test vérifie
+      que le titre du schéma est bien l'`eventType`, puisque c'est lui qui forme le sujet.
+      `subjects.properties` dit sur quel topic chaque schéma circule. Commit `6b38dda`.
+- [x] **P2-T2** `KafkaJsonSchemaSerializer` / `Deserializer` 8.4.1 configurés, `auto.register.schemas=false` (enregistrement explicite).
+      *Vérif* : `./mvnw -pl common-kafka -am test` → **8 tests verts**. De bout en bout :
+      3 `POST /orders` → 3 événements consommés. `od -c` sur le topic montre
+      `        004 {` — octet magique 0, id de schéma 4, puis le JSON.
+      Commits `6b38dda`, `8fd1a34`.
+      `EventJsonSchemaSerializer` impose le schéma du fichier (le schéma dérivé de la classe
+      s'appellerait `"Order Placed"`), `json.fail.invalid.schema=true` (défaut `false` : un
+      message hors contrat partait sans un mot) et `TopicRecordNameStrategy`.
+- [x] **P2-T3** Enregistrement des schémas au build (plugin Maven ou script), avec stratégie de sujet `TopicRecordNameStrategy`.
+      *Vérif* : `infra/schemas/register-schemas.ps1` → **4 sujets** (topic de base, retry-1,
+      retry-2, DLT), tous `id=4` — les ids de schéma sont globaux, les sujets ne sont que des
+      pointeurs. Commit `8fd1a34`.
+      Découvert par un test : le nom du topic faisant partie du sujet, les topics dérivés ont
+      besoin de leur propre enregistrement, sinon `Error retrieving latest version`.
+- [x] **P2-T4** Compatibilité `BACKWARD` imposée sur tous les sujets.
+      *Vérif* : `Invoke-RestMethod http://localhost:8081/config/<sujet>` → `BACKWARD` sur les
+      4 sujets, et `BACKWARD` en global. Commit `8fd1a34`.
+- [x] **P2-T5** **Expérience évolution** : ajouter un champ optionnel → passe. Ajouter un champ requis → rejeté. Documenter les deux.
+      *Vérif* : `infra/schemas/p2-t5-evolution.ps1`, sur un sujet de laboratoire supprimé à la
+      fin (le contrat réel reste en v1). Commit `6b11f80`.
+      A champ optionnel → **compatible** ; B champ requis → refusé
+      (`REQUIRED_PROPERTY_ADDED_TO_UNOPEN_CONTENT_MODEL`) ; C retrait d'un champ → refusé
+      (`PROPERTY_REMOVED_FROM_CLOSED_CONTENT_MODEL`).
+      C n'était pas prévu : c'est le coût d'`additionalProperties: false`. Le modèle fermé
+      attrape les fautes de frappe **et** rigidifie l'évolution.
+- [x] **P2-T6** Résoudre le conflit Jackson 2 / Jackson 3 si les serdes Confluent le déclenchent.
+      *Vérif* : `./mvnw -pl common-kafka dependency:tree` → `tools.jackson.core:jackson-databind:3.1.8`
+      et `com.fasterxml.jackson.core:jackson-databind:2.21.8` cohabitent. Commit `6b38dda`.
+      Il n'y a pas de conflit de versions, les packages différant. Le vrai problème est que
+      les serdes Confluent sérialisent en Jackson 2, qui écrit un `Instant` en timestamp
+      décimal là où la phase 1 produisait de l'ISO-8601 : le type d'un champ du contrat
+      changeait silencieusement. Corrigé par un mapper Jackson 2 explicite.
+- [x] **P2-T7** `docs/patterns/02-schema-registry-evolution.md`.
+      *Vérif* : fiche écrite avec les mesures réelles, les codes d'erreur du registre, et les
+      trois incidents rencontrés — `Unknown magic byte!` (un changement de format est une
+      migration, pas une évolution), `error code: 40403` (supprimer un schéma casse le passé),
+      et le format des dates selon la bibliothèque qui sérialise.
 
 ---
 
@@ -326,3 +358,6 @@ Objectif : ce qui séparerait ce labo d'un vrai déploiement.
 | 2026-11-22 | 1 | P1-T1 à P1-T3 | Premier flux de bout en bout : `OrderPlaced` avec enveloppe, `POST /orders` → topic clé `orderId`, consumer `@KafkaListener`. Deux revues de sécurité traitées : bornes de validation ajoutées, prix/authentification reportés en P12-T8, poison message laissé visible pour la phase 4. |
 | 2026-11-22 | 1 | P1-T4 à P1-T6 | Trois expériences scriptées dans `infra/experiments/` : répartition des clés (33/30/37 %), rebalancing (4 instances pour 3 partitions → une inactive), offsets (rejeu complet 272 événements, partiel 171, 47 s d'expiration de session). |
 | 2026-11-22 | 1 | P1-T7, P1-T8 | Le même consumer écrit en Spring Cloud Stream 5.1.0 sous profil `cloud-stream` ; décision par module dans ADR-002. Fiche `01-partitions-cles-groupes.md`. **Phase 1 terminée (8/8).** |
+| 2026-11-22 | 2 | P2-T1, P2-T2, P2-T6 | Le contrat devient un fichier JSON Schema versionné, publié via le mécanisme d'enveloppe de Confluent plutôt que dérivé de la classe. Trois défauts de configuration corrigés explicitement (`auto.register.schemas`, `json.fail.invalid.schema`, stratégie de sujet) et le format des dates rétabli en ISO-8601. |
+| 2026-11-22 | 2 | P2-T3, P2-T4 | Enregistrement explicite par script : 4 sujets en `BACKWARD`. Deux pièges PowerShell 5.1 trouvés en route — `ConvertTo-Json` qui se bloque sans rien émettre, et `Get-Content` qui lit en ANSI et double-encodait le contrat publié. |
+| 2026-11-22 | 2 | P2-T5, P2-T7 | Expérience de compatibilité : champ optionnel accepté, champ requis refusé, retrait refusé à cause du modèle de contenu fermé. Trois incidents réels documentés dans la fiche 02. **Phase 2 terminée (7/7).** |
