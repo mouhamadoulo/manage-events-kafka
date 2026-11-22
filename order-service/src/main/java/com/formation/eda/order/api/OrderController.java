@@ -1,5 +1,6 @@
 package com.formation.eda.order.api;
 
+import com.formation.eda.order.application.EventPublicationFailedException;
 import com.formation.eda.order.application.PlaceOrderService;
 import com.formation.eda.order.application.PlaceOrderService.PlacedOrder;
 import jakarta.validation.Valid;
@@ -38,6 +39,23 @@ public class OrderController {
                 request.toOrderLines(),
                 request.currencyOrDefault());
         return PlaceOrderResponse.from(placed);
+    }
+
+    /**
+     * 503 et non 500 : la commande n'a pas ete prise, mais rien n'est casse cote serveur.
+     * Le client peut reessayer, et comme l'{@code eventId} est genere avant l'envoi, un
+     * reessai cote serveur serait meme detectable.
+     *
+     * <p>Attention a ce que ce handler ne dit PAS : l'absence d'erreur ne prouve pas que
+     * l'evenement est ecrit. Avec {@code acks=0}, le producteur ne le sait pas lui-meme
+     * (cf. experience P3-T3).
+     */
+    @ExceptionHandler(EventPublicationFailedException.class)
+    public ProblemDetail onPublicationFailure(EventPublicationFailedException exception) {
+        ProblemDetail problem = ProblemDetail.forStatus(HttpStatus.SERVICE_UNAVAILABLE);
+        problem.setTitle("Commande non prise");
+        problem.setDetail(exception.getMessage());
+        return problem;
     }
 
     /**

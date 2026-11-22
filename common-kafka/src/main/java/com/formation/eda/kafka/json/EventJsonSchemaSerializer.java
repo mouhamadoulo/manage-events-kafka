@@ -44,6 +44,9 @@ import java.util.Map;
  */
 public class EventJsonSchemaSerializer implements Serializer<DomainEvent> {
 
+    /** Reglage de laboratoire : voir {@link #configure(Map, boolean)}. */
+    public static final String VALIDATE_PAYLOAD = "eda.validate.payload";
+
     private final SchemaCatalog catalog = new SchemaCatalog();
 
     // Jackson 2, comme les serdes Confluent. Ce mapper decide du format du payload, puisque
@@ -72,7 +75,16 @@ public class EventJsonSchemaSerializer implements Serializer<DomainEvent> {
         // qu'un seul schema par topic.
         merged.put(isKey ? "key.subject.name.strategy" : "value.subject.name.strategy",
                 TopicRecordNameStrategy.class.getName());
-        merged.put("json.fail.invalid.schema", true);
+        // Validation du payload contre le schema, a chaque message. Active par defaut : sans
+        // elle, un message hors contrat part sans un mot (le defaut Confluent est false).
+        //
+        // La cle VALIDATE_PAYLOAD permet de la couper, et elle n'existe que pour pouvoir
+        // MESURER ce qu'elle coute (experience P3-T5) : la validation JSON Schema se fait sur
+        // le thread appelant, a chaque envoi, et devient vite le facteur limitant du debit.
+        // Aucun service ne la coupe — seul l'outil de rafale du profil lab le fait.
+        Object validate = merged.getOrDefault(VALIDATE_PAYLOAD, Boolean.TRUE);
+        merged.put("json.fail.invalid.schema", Boolean.parseBoolean(String.valueOf(validate)));
+        merged.remove(VALIDATE_PAYLOAD);
 
         delegate = new KafkaJsonSchemaSerializer<>();
         delegate.configure(merged, isKey);

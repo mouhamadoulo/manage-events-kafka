@@ -17,6 +17,57 @@ spring:
       # json.fail.invalid.schema=true et TopicRecordNameStrategy. Voir
       # com.formation.eda.kafka.json.EventJsonSchemaSerializer pour le detail et les raisons.
       value-serializer: com.formation.eda.kafka.json.EventJsonSchemaSerializer
+
+      # --- Phase 3 : ce qu'un send() garantit -------------------------------------------
+      # acks=all : le leader n'accuse qu'une fois le record repliqué sur toutes les replicas
+      # synchrones (ISR). Defaut depuis Kafka 3.0. Les deux autres valeurs :
+      #   acks=0   -> aucun accuse. Le producteur considere l'envoi reussi des que les octets
+      #               partent sur la socket. Perte invisible garantie si le broker tombe
+      #               (mesure : experience P3-T3).
+      #   acks=1   -> le leader a ecrit, les replicas pas forcement. Un basculement de leader
+      #               juste apres perd le record.
+      # Sur ce labo mono-noeud, acks=all ne protege de rien (une seule replica) : la vraie
+      # garantie vient du couple replication.factor >= 3 / min.insync.replicas = 2,
+      # traite en P12-T6.
+      acks: all
+
+      # Nombre de tentatives. Avec l'idempotence active, la valeur par defaut est
+      # Integer.MAX_VALUE : ce qui borne reellement les reessais, c'est delivery.timeout.ms.
+      retries: 2147483647
+
+      properties:
+        # enable.idempotence=true : le producteur numerote ses records (producer id +
+        # sequence) et le broker rejette un doublon de sequence. Sans cela, un reessai apres
+        # un accuse perdu ecrit le record DEUX FOIS (mesure : experience P3-T4).
+        # Defaut true depuis Kafka 3.0 — mais il suffit de toucher acks, retries ou
+        # max.in.flight a une valeur incompatible pour que le producteur refuse de demarrer.
+        enable.idempotence: true
+
+        # Nombre de lots en vol simultanement sur une connexion.
+        # WHY 5 et pas 1 : l'idempotence preserve l'ordre jusqu'a 5 grace aux numeros de
+        # sequence — le broker reordonne. Au-dela de 5 avec idempotence, le producteur
+        # refuse de demarrer. SANS idempotence, toute valeur > 1 permet qu'un lot reessaye
+        # passe APRES un lot suivant : l'ordre de la partition est alors casse.
+        max.in.flight.requests.per.connection: 5
+
+        # Budget total d'un send(), reessais compris. C'est la seule borne qui compte :
+        # au-dela, le future echoue, et c'est au code de le voir (cf. KafkaEventPublisher).
+        delivery.timeout.ms: 120000
+        # Attente d'une reponse du broker pour UNE tentative. Doit rester tres inferieur a
+        # delivery.timeout.ms, sinon il ne reste pas de place pour reessayer.
+        request.timeout.ms: 30000
+
+        # --- Debit (P3-T5) ---------------------------------------------------------------
+        # linger.ms=0 par defaut : le producteur envoie des qu'il peut, donc souvent un
+        # record par requete. A 5 ms, il attend un peu pour remplir un lot : latence +5 ms
+        # au pire, debit nettement meilleur en rafale.
+        linger.ms: 5
+        # Taille maximale d'un lot par partition, en octets (defaut 16384).
+        batch.size: 32768
+        # zstd compresse mieux que lz4 et coute plus de CPU ; snappy est l'inverse. La
+        # compression s'applique au LOT, donc elle ne sert a rien si les lots ne se
+        # remplissent pas — d'ou le lien direct avec linger.ms.
+        compression.type: zstd
     consumer:
       # earliest en dev : un nouveau consumer group rejoue tout l'historique du topic.
       # Defaut Kafka = latest, qui masquerait les messages deja publies.
