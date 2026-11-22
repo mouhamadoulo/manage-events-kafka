@@ -146,6 +146,31 @@ Observer le flux dans Kafka UI : http://localhost:8080
 
 ---
 
+## Expériences
+
+Les mécanismes de Kafka s'apprennent en les faisant bouger. Chaque phase laisse des scripts
+rejouables dans `infra/experiments/` :
+
+```powershell
+./infra/experiments/p1-t4-partitions.ps1 -Count 100
+```
+
+```powershell
+./infra/experiments/p1-t5-rebalancing.ps1 -Instances 4
+```
+
+```powershell
+./infra/experiments/p1-t6-offsets.ps1
+```
+
+```powershell
+./infra/experiments/p1-t7-deux-modeles.ps1
+```
+
+Ce qu'elles montrent et les mesures relevées : `docs/patterns/`.
+
+---
+
 ## Interfaces
 
 | Service | URL |
@@ -157,6 +182,7 @@ Observer le flux dans Kafka UI : http://localhost:8080
 | inventory-service | http://localhost:8093 |
 | shipping-service | http://localhost:8094 |
 | notification-service | http://localhost:8095 |
+| — dont `GET /stats` | compteurs par partition de l'instance |
 | analytics-service | http://localhost:8096 |
 
 ---
@@ -172,7 +198,7 @@ inventory-service/    participant saga, exactly-once
 shipping-service/     participant saga
 notification-service/ consumer terminal idempotent
 analytics-service/    Kafka Streams
-infra/                docker-compose + scripts topics
+infra/                docker-compose, scripts topics, experiences
 docs/                 TASKS.md, adr/, patterns/
 ```
 

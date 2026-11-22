@@ -2,7 +2,7 @@
 
 **Source de vérité de l'avancement du projet.** Toute tâche terminée est cochée ici, datée, avec sa commande de vérification exécutée.
 
-Dernière mise à jour : **2026-11-21**
+Dernière mise à jour : **2026-11-22**
 
 ## Légende
 
@@ -22,7 +22,7 @@ Convention d'ID : `P<phase>-T<tâche>`. Les tâches se réfèrent par leur ID da
 | Phase | Thème | Tâches | Fait | État |
 |---|---|---|---|---|
 | 0 | Socle & infra | 9 | 9 | **terminée** |
-| 1 | Producer / Consumer fondamentaux | 8 | 0 | à faire |
+| 1 | Producer / Consumer fondamentaux | 8 | 8 | **terminée** |
 | 2 | Contrats & JSON Schema | 7 | 0 | à faire |
 | 3 | Fiabilité producer | 6 | 0 | à faire |
 | 4 | Fiabilité consumer : retry, DLQ, idempotence | 8 | 0 | à faire |
@@ -33,9 +33,9 @@ Convention d'ID : `P<phase>-T<tâche>`. Les tâches se réfèrent par leur ID da
 | 9 | Kafka Streams | 9 | 0 | à faire |
 | 10 | Stratégie de test | 7 | 0 | à faire |
 | 11 | Observabilité & exploitation | 8 | 0 | à faire |
-| 12 | Prod-readiness & sécurité | 7 | 0 | à faire |
+| 12 | Prod-readiness & sécurité | 8 | 0 | à faire |
 | 13 | Synthèse & restitution | 5 | 0 | à faire |
-| | **Total** | **104** | **9** | |
+| | **Total** | **105** | **17** | |
 
 ---
 
@@ -78,19 +78,53 @@ Objectif : un broker KRaft qui tourne, un build multi-module qui passe, de quoi 
 
 Objectif : sentir physiquement partitions, clés, groupes et offsets.
 
-- [ ] **P1-T1** `OrderPlaced` en record dans `common-events` avec l'enveloppe complète (`eventId`, `occurredAt`, `correlationId`, …).
-- [ ] **P1-T2** `order-service` : `POST /orders` → publication `OrderPlaced` sur `shop.order.events.v1`, clé = `orderId`.
-      *Vérif* : message visible dans Kafka UI avec la bonne clé.
-- [ ] **P1-T3** `notification-service` : consumer `@KafkaListener`, log de l'événement.
-      *Vérif* : log au démarrage avec `auto-offset-reset: earliest`.
-- [ ] **P1-T4** **Expérience partitions** : publier 100 commandes sur 3 partitions, observer la répartition par clé.
-      *Vérif* : noter la distribution dans la fiche pattern.
-- [ ] **P1-T5** **Expérience consumer group** : lancer 2 puis 4 instances de `notification-service`, observer l'assignation et le rebalancing.
-      *Vérif* : `kafka-consumer-groups.sh --describe`.
-- [ ] **P1-T6** **Expérience offsets** : reset d'offset sur un groupe, rejeu complet, puis `--to-datetime`.
-      *Vérif* : `kafka-consumer-groups.sh --reset-offsets --to-earliest --execute`.
-- [ ] **P1-T7** Comparer `@KafkaListener` (spring-kafka) et binding fonctionnel Spring Cloud Stream 5.1.0 sur le même cas ; décider l'usage par module.
-- [ ] **P1-T8** `docs/patterns/01-partitions-cles-groupes.md` + `docs/adr/ADR-002-spring-kafka-vs-cloud-stream.md`.
+- [x] **P1-T1** `OrderPlaced` en record dans `common-events` avec l'enveloppe complète (`eventId`, `occurredAt`, `correlationId`, …).
+      *Vérif* : `./mvnw -pl common-events test` → **11 tests verts**. `EventEnvelope.root()` /
+      `causedBy()` testés sur une chaîne de 4 événements. Aller-retour JSON sans perte et
+      champs exacts du contrat vérifiés. Commit `cf2e803`.
+      Décision : `version` = version du **contrat**, pas la séquence de l'agrégat (champ
+      distinct en phase 8). `isRoot()` est `@JsonIgnore` — un accesseur préfixé `is` ajoutait
+      un champ `"root"` non déclaré au JSON.
+- [x] **P1-T2** `order-service` : `POST /orders` → publication `OrderPlaced` sur `shop.order.events.v1`, clé = `orderId`.
+      *Vérif* : `POST /orders` → **202 Accepted**, `{"partition":0,"offset":0}`.
+      `kafka-console-consumer --property print.key=true --property print.headers=true`
+      affiche `cle=order-7f7f4283-…`, headers `eventId/eventType/correlationId`, et **aucun**
+      header `__TypeId__`. Commit `685cefd`.
+      Durcissement après revue de sécurité : `@Positive`, `@Digits(7,2)` et bornes de taille
+      sur l'entrée (POST avec 2000 décimales → 400). Prix et `customerId` fournis par le
+      client restent des limites assumées du labo → **P12-T8**.
+- [x] **P1-T3** `notification-service` : consumer `@KafkaListener`, log de l'événement.
+      *Vérif* : `partitions assigned: [shop.order.events.v1-0, -1, -2]` au démarrage, puis
+      `recu #1 OrderPlaced cle=order-7f7f4283-… partition=0 offset=0`. `GET /stats` →
+      `{"received":1,"byPartition":{"0":1}}`. Commit `6cb3252`.
+      Le `JacksonJsonDeserializer` reste **nu** jusqu'à la phase 4 : un message illisible
+      bloque la partition. Commenté dans l'`application.yml`, c'est la démonstration à faire
+      en P4.
+- [x] **P1-T4** **Expérience partitions** : publier 100 commandes sur 3 partitions, observer la répartition par clé.
+      *Vérif* : `infra/experiments/p1-t4-partitions.ps1` → **33 % / 30 % / 37 %** sur 100 clés
+      distinctes. Même clé 5 fois → **toujours la partition 2**. Commit `251f07d`.
+      Piège trouvé en route : un BOM UTF-8 ajouté par un pipe PowerShell change la clé
+      (`\uFEFForder-A`) et donc la partition, à affichage identique.
+- [x] **P1-T5** **Expérience consumer group** : lancer 2 puis 4 instances de `notification-service`, observer l'assignation et le rebalancing.
+      *Vérif* : `infra/experiments/p1-t5-rebalancing.ps1` + `--describe` → 1 instance : 3
+      partitions ; 2 : 2+1 ; 3 : 1 chacune ; **4 : une instance sans partition, 0 événement**.
+      L'instance écartée n'est pas la dernière démarrée. Commit `50066c9`.
+- [x] **P1-T6** **Expérience offsets** : reset d'offset sur un groupe, rejeu complet, puis `--to-datetime`.
+      *Vérif* : `infra/experiments/p1-t6-offsets.ps1` → reset refusé sur groupe actif
+      (`current state is Stable`) ; `--to-earliest` → offsets 0, LAG 86/95/91, **272
+      événements retraités** ; `--to-datetime` → offsets 31/39/31, **171 événements**.
+      Mesure notable : **47 s** avant que le groupe passe à `Empty` après un `kill` (pas de
+      `LeaveGroup`, expiration de `session.timeout.ms`). Commit `251ae8e`.
+- [x] **P1-T7** Comparer `@KafkaListener` (spring-kafka) et binding fonctionnel Spring Cloud Stream 5.1.0 sur le même cas ; décider l'usage par module.
+      *Vérif* : `infra/experiments/p1-t7-deux-modeles.ps1` → les deux consomment 5/5 ;
+      démarrage 4,3 s contre 3,7 s ; 180 contre 599 lignes de log. `./mvnw clean verify` →
+      BUILD SUCCESS, 9 modules. Commit `2627259`.
+      Décision (ADR-002) : **spring-kafka** pour les 5 services de la saga, **Spring Cloud
+      Stream** pour `analytics-service` (Kafka Streams). Le profil `cloud-stream` de
+      `notification-service` reste en état de marche comme terrain de comparaison.
+- [x] **P1-T8** `docs/patterns/01-partitions-cles-groupes.md` + `docs/adr/ADR-002-spring-kafka-vs-cloud-stream.md`.
+      *Vérif* : les deux fiches écrites avec les mesures réelles des expériences T4 à T7, et
+      un tableau « comment le casser pour voir l'échec ».
 
 ---
 
@@ -263,6 +297,11 @@ Objectif : ce qui séparerait ce labo d'un vrai déploiement.
 - [ ] **P12-T6** Multi-broker (3 nœuds KRaft), `replication.factor=3`, `min.insync.replicas=2`.
       *Vérif* : tuer un broker, le cluster reste disponible.
 - [ ] **P12-T7** `docs/patterns/12-prod-readiness.md`.
+- [ ] **P12-T8** Authentifier `POST /orders` : `customerId` lu dans le jeton et non dans le
+      corps, prix lu dans un catalogue côté serveur et non fourni par le client.
+      *Vérif* : un POST qui annonce un autre `customerId` ou un prix arbitraire est rejeté.
+      Origine : revue de sécurité du commit `685cefd`, limites assumées en phase 1 (cf.
+      javadoc de `PlaceOrderRequest`).
 
 ---
 
@@ -284,3 +323,6 @@ Objectif : ce qui séparerait ce labo d'un vrai déploiement.
 | 2026-11-21 | 0 | P0-T1 à T4, T7 à T9 | Socle en place : git, parent POM, wrapper 3.9.13, 9 modules, ADR-001, fiche pattern 00. `./mvnw clean verify` vert sous JDK 25.0.2+10. |
 | 2026-11-21 | 0 | P0-T5, P0-T6 | Infra vérifiée après redémarrage de Docker Desktop : 4 conteneurs healthy, 17 topics créés avec les bonnes politiques de nettoyage, 5 bases Postgres. Trois pièges corrigés et documentés (volume Postgres 18, préfixe bootstrap du Schema Registry, `MSYS_NO_PATHCONV`). |
 | 2026-11-21 | 0 | — | **Phase 0 terminée (9/9).** Dépôt public : https://github.com/mouhamadoulo/manage-events-kafka |
+| 2026-11-22 | 1 | P1-T1 à P1-T3 | Premier flux de bout en bout : `OrderPlaced` avec enveloppe, `POST /orders` → topic clé `orderId`, consumer `@KafkaListener`. Deux revues de sécurité traitées : bornes de validation ajoutées, prix/authentification reportés en P12-T8, poison message laissé visible pour la phase 4. |
+| 2026-11-22 | 1 | P1-T4 à P1-T6 | Trois expériences scriptées dans `infra/experiments/` : répartition des clés (33/30/37 %), rebalancing (4 instances pour 3 partitions → une inactive), offsets (rejeu complet 272 événements, partiel 171, 47 s d'expiration de session). |
+| 2026-11-22 | 1 | P1-T7, P1-T8 | Le même consumer écrit en Spring Cloud Stream 5.1.0 sous profil `cloud-stream` ; décision par module dans ADR-002. Fiche `01-partitions-cles-groupes.md`. **Phase 1 terminée (8/8).** |
