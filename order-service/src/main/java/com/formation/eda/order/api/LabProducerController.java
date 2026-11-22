@@ -65,6 +65,7 @@ public class LabProducerController {
     /** Ce que la rafale a produit, et ce que le producteur en sait. */
     public record BurstResult(
             int requested,
+            int enqueued,
             int acknowledged,
             int failed,
             long durationMs,
@@ -77,6 +78,7 @@ public class LabProducerController {
             int maxInFlight,
             boolean validate,
             int deliveryTimeoutMs,
+            int maxBlockMs,
             String firstFailure) {
     }
 
@@ -91,7 +93,9 @@ public class LabProducerController {
             @RequestParam(defaultValue = "5") int maxInFlight,
             @RequestParam(defaultValue = "true") boolean validate,
             @RequestParam(defaultValue = "60000") int deliveryTimeoutMs,
-            @RequestParam(defaultValue = "30000") int requestTimeoutMs) {
+            @RequestParam(defaultValue = "30000") int requestTimeoutMs,
+            @RequestParam(defaultValue = "5000") int maxBlockMs,
+            @RequestParam(defaultValue = "true") boolean abortOnFailure) {
 
         // Le producteur refuse de demarrer si delivery.timeout.ms < linger.ms +
         // request.timeout.ms :
@@ -118,12 +122,19 @@ public class LabProducerController {
         config.put(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION, maxInFlight);
         config.put(ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG, deliveryTimeoutMs);
         config.put(ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG, requestTimeoutMs);
+        // max.block.ms borne le temps que send() passe A BLOQUER quand le buffer du
+        // producteur est plein ou que les metadonnees manquent. Defaut 60 s : avec un broker
+        // mort, le buffer (32 Mo) se remplit en quelques milliers de messages et chaque
+        // send() suivant attend une minute. C'est ce qui fait croire a un "freeze" de
+        // l'application alors que le producteur fait exactement ce qu'on lui a demande.
+        config.put(ProducerConfig.MAX_BLOCK_MS_CONFIG, maxBlockMs);
         if (!idempotence) {
             // Sans idempotence, retries doit etre explicite : c'est lui qui rend la
             // duplication possible (un lot reessaye que le broker avait deja ecrit).
             config.put(ProducerConfig.RETRIES_CONFIG, Integer.MAX_VALUE);
         }
 
+        int enqueued = 0;
         AtomicInteger acknowledged = new AtomicInteger();
         AtomicInteger failed = new AtomicInteger();
         List<String> firstFailure = new ArrayList<>(1);
@@ -135,11 +146,18 @@ public class LabProducerController {
             List<CompletableFuture<SendResult<String, Object>>> futures = new ArrayList<>(count);
 
             for (int i = 0; i < count; i++) {
+                enqueued = i + 1;
                 OrderPlaced event = OrderPlaced.of(
                         "order-burst-" + i + "-" + System.nanoTime(),
                         "customer-" + (i % 50),
                         List.of(new OrderLine("SKU-" + (i % 20), 1 + (i % 3), new BigDecimal("7.90"))),
                         "EUR");
+                // WHY ce try/catch : la serialisation se fait sur le thread appelant, AVANT
+                // que le future existe. Quand le broker ou le registre tombe en pleine
+                // rafale, send() leve directement — et sans ce filet, toute la rafale
+                // s'arrete et l'endpoint renvoie 500 au lieu de rendre ses compteurs. Or
+                // c'est precisement pendant une panne que les compteurs interessent.
+                try {
                 futures.add(template.send(Topics.ORDER_EVENTS, event.partitionKey(), event)
                         .whenComplete((result, failure) -> {
                             if (failure == null) {
@@ -156,6 +174,23 @@ public class LabProducerController {
                                 }
                             }
                         }));
+                } catch (RuntimeException e) {
+                    failed.incrementAndGet();
+                    synchronized (firstFailure) {
+                        if (firstFailure.isEmpty()) {
+                            firstFailure.add("[synchrone] " + e.getClass().getSimpleName()
+                                    + " : " + e.getMessage());
+                        }
+                    }
+                    // Une fois le buffer plein, CHAQUE send() suivant bloque max.block.ms
+                    // avant d'echouer : poursuivre la boucle sur 20 000 messages prend des
+                    // heures pour n'apprendre rien de plus. S'arreter au premier echec est
+                    // aussi ce qu'une application reelle fait — elle cesse d'accepter.
+                    if (abortOnFailure) {
+                        enqueued = i + 1;
+                        break;
+                    }
+                }
             }
 
             // allOf echouerait des la premiere exception ; exceptionally(null) laisse chaque
@@ -172,10 +207,10 @@ public class LabProducerController {
 
         long durationMs = Math.max(1, (System.nanoTime() - start) / 1_000_000);
         BurstResult result = new BurstResult(
-                count, acknowledged.get(), failed.get(), durationMs,
+                count, enqueued, acknowledged.get(), failed.get(), durationMs,
                 count * 1000L / durationMs,
                 acks, idempotence, lingerMs, batchSize, compression, maxInFlight,
-                validate, deliveryTimeoutMs,
+                validate, deliveryTimeoutMs, maxBlockMs,
                 firstFailure.isEmpty() ? null : firstFailure.get(0));
 
         log.info("rafale terminee : {}", result);

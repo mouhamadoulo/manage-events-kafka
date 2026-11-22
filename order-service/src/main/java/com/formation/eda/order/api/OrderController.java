@@ -54,7 +54,12 @@ public class OrderController {
     public ProblemDetail onPublicationFailure(EventPublicationFailedException exception) {
         ProblemDetail problem = ProblemDetail.forStatus(HttpStatus.SERVICE_UNAVAILABLE);
         problem.setTitle("Commande non prise");
-        problem.setDetail(exception.getMessage());
+        // WHY un message generique : le message d'origine vient du client Kafka et nomme
+        // l'infrastructure (hote et port du broker, du Schema Registry, sujet, timeouts).
+        // Le client HTTP n'en a pas besoin pour reessayer, et cela lui apprendrait la
+        // topologie interne. Le detail reste cote serveur, deja journalise avec l'eventId
+        // par KafkaEventPublisher.
+        problem.setDetail("Publication indisponible, reessayez.");
         return problem;
     }
 
