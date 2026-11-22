@@ -76,7 +76,11 @@ Write-Host "=== Enregistrement, compatibilite $Compatibility ===" -ForegroundCol
 foreach ($mapping in $mappings) {
     $schemaFile = Join-Path $SchemaDir "$($mapping.EventType).json"
     if (-not (Test-Path $schemaFile)) { throw "schema absent : $schemaFile" }
-    $schemaText = Get-Content $schemaFile -Raw
+    # WHY -Encoding UTF8 : Get-Content de PowerShell 5.1 lit par defaut dans la page de code
+    # ANSI. Un caractere non ASCII du fichier (le "§" des renvois a CLAUDE.md) arrivait
+    # double-encode dans le schema publie, sous la forme "ÃÂ§" : le contrat livre aux
+    # consumers n'etait alors pas celui du depot.
+    $schemaText = Get-Content $schemaFile -Raw -Encoding UTF8
 
     # Le titre du schema doit etre l'eventType : c'est lui qui forme le nom du sujet.
     $title = ($schemaText | ConvertFrom-Json).title

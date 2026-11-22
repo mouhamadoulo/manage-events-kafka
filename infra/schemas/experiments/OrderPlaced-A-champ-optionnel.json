@@ -1,0 +1,133 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "OrderPlaced",
+  "description": "Variante A : ajoute 'channel' sans le rendre obligatoire.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "envelope",
+    "orderId",
+    "customerId",
+    "lines",
+    "totalAmount",
+    "currency"
+  ],
+  "properties": {
+    "envelope": {
+      "$ref": "#/definitions/EventEnvelope"
+    },
+    "orderId": {
+      "description": "Identite de la commande. Sert aussi de cle de partition.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "customerId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "lines": {
+      "description": "Au moins une ligne : une commande vide n'a pas de sens.",
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "items": {
+        "$ref": "#/definitions/OrderLine"
+      }
+    },
+    "totalAmount": {
+      "description": "Montant arrete au moment de la commande, pas recalcule par les consumers.",
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "currency": {
+      "type": "string",
+      "pattern": "^[A-Z]{3}$"
+    },
+    "channel": {
+      "description": "Canal de prise de commande. Ajoute en v2, OPTIONNEL : absent des messages v1.",
+      "type": "string",
+      "enum": [
+        "WEB",
+        "MOBILE",
+        "STORE"
+      ]
+    }
+  },
+  "definitions": {
+    "EventEnvelope": {
+      "description": "Enveloppe technique commune a tous les evenements (cf. CLAUDE.md §4).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "eventId",
+        "eventType",
+        "occurredAt",
+        "correlationId",
+        "aggregateId",
+        "version"
+      ],
+      "properties": {
+        "eventId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "eventType": {
+          "type": "string",
+          "minLength": 1
+        },
+        "occurredAt": {
+          "description": "Instant du fait metier, en ISO-8601 UTC. Distinct du timestamp Kafka du record.",
+          "type": "string",
+          "format": "date-time"
+        },
+        "correlationId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "causationId": {
+          "description": "null pour un evenement racine : rien dans le systeme ne l'a cause.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "aggregateId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "description": "Version du CONTRAT de l'evenement, pas la sequence de l'agregat.",
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "OrderLine": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sku",
+        "quantity",
+        "unitPrice"
+      ],
+      "properties": {
+        "sku": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "quantity": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "unitPrice": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      }
+    }
+  }
+}
