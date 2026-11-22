@@ -27,6 +27,16 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-actuator</artifactId>
         </dependency>
+        <!--
+          Les deux modeles de programmation cohabitent volontairement dans ce module
+          (P1-T7, ADR-002) : @KafkaListener par defaut, binding fonctionnel Spring Cloud
+          Stream sous le profil "cloud-stream". Comparer sur le MEME cas est la seule facon
+          de decider sur autre chose qu'une preference.
+        -->
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-stream-binder-kafka</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-kafka-test</artifactId>

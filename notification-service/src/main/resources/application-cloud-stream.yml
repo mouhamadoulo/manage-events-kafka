@@ -1,0 +1,48 @@
+# Profil cloud-stream : meme consommation que le @KafkaListener, via Spring Cloud Stream.
+# Lancer avec :
+#   java -jar notification-service/target/notification-service-0.1.0-SNAPSHOT.jar \
+#        --spring.profiles.active=cloud-stream
+#
+# Sert a comparer les deux modeles sur le meme cas (P1-T7, ADR-002).
+
+spring:
+  kafka:
+    consumer:
+      # Aligne sur le groupe du binding ci-dessous. Le groupe qui compte est celui declare
+      # dans spring.cloud.stream.bindings ; cette propriete ne sert qu'a ce que /stats
+      # n'affiche pas le groupe de l'autre modele.
+      group-id: notification-service-cs
+  cloud:
+    function:
+      # Sans cette ligne, un contexte contenant plusieurs beans fonctionnels ne sait pas
+      # lequel brancher. Le nom est celui de la METHODE @Bean.
+      definition: onOrderPlaced
+    stream:
+      bindings:
+        # Convention de nommage imposee : <fonction>-in-<index>. Aucun rapport avec le nom
+        # du topic, qui est donne par "destination".
+        onOrderPlaced-in-0:
+          destination: shop.order.events.v1
+          # Equivalent de group.id. WHY un groupe different de celui du @KafkaListener :
+          # pour pouvoir lancer les deux variantes a la suite sans que l'une herite des
+          # offsets de l'autre, et donc comparer sur la meme matiere.
+          group: notification-service-cs
+          consumer:
+            # Equivalent de auto-offset-reset: earliest. Nomme autrement : le binder a son
+            # propre vocabulaire par-dessus celui de Kafka, ce qui est precisement le cout
+            # de l'abstraction.
+            start-offset: earliest
+      kafka:
+        binder:
+          brokers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+          # Le binder cree les topics absents par defaut ; le broker refuse la creation
+          # implicite (auto.create.topics.enable=false) et les topics sont declares dans
+          # infra/topics. On le dit explicitement pour que l'intention soit lisible.
+          auto-create-topics: false
+        bindings:
+          onOrderPlaced-in-0:
+            consumer:
+              # Les evenements ne portent pas de header de type (le producteur envoie
+              # spring.json.add.type.headers=false), donc la conversion se fait sur le type
+              # declare par la signature du Consumer.
+              use-native-decoding: false

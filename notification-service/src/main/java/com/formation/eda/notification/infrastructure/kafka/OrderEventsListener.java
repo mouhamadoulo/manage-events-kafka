@@ -2,20 +2,16 @@ package com.formation.eda.notification.infrastructure.kafka;
 
 import com.formation.eda.events.Topics;
 import com.formation.eda.events.order.OrderPlaced;
+import com.formation.eda.notification.application.EventCounters;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.annotation.Profile;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
 import java.time.Instant;
-import java.util.Map;
-import java.util.SortedMap;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.LongAdder;
-import java.util.TreeMap;
 
 /**
  * Consumer terminal : notification-service lit les evenements de commande et n'en produit
@@ -27,17 +23,22 @@ import java.util.TreeMap;
  * fois : apres un rebalancing ou un redemarrage, les memes evenements peuvent repasser.
  * L'experience P1-T6 (reset d'offsets) le montre volontairement, et la phase 4 y remedie avec
  * la table {@code processed_event}.
+ *
+ * <p>Desactive sous le profil {@code cloud-stream}, ou la meme consommation est assuree par
+ * le binding fonctionnel (P1-T7). Les deux ensemble liraient le topic dans deux groupes
+ * distincts et compteraient chaque evenement deux fois.
  */
 @Component
+@Profile("!cloud-stream")
 public class OrderEventsListener {
 
     private static final Logger log = LoggerFactory.getLogger(OrderEventsListener.class);
 
-    private final AtomicLong received = new AtomicLong();
+    private final EventCounters counters;
 
-    // Compteur par partition : c'est la matiere des experiences P1-T4 (repartition des cles)
-    // et P1-T5 (quelles partitions cette instance s'est vue assigner).
-    private final Map<Integer, LongAdder> countsByPartition = new ConcurrentHashMap<>();
+    public OrderEventsListener(EventCounters counters) {
+        this.counters = counters;
+    }
 
     /**
      * {@code groupId} vient de la configuration, pas d'une constante.
@@ -61,7 +62,7 @@ public class OrderEventsListener {
             return;
         }
 
-        countsByPartition.computeIfAbsent(record.partition(), p -> new LongAdder()).increment();
+        long rank = counters.record(record.partition());
 
         // Ecart entre l'instant du fait metier et l'instant de reception : la latence reelle
         // de la chaine, bout en bout. Le timestamp du record, lui, est l'instant de
@@ -69,7 +70,7 @@ public class OrderEventsListener {
         Duration lag = Duration.between(event.envelope().occurredAt(), Instant.now());
 
         log.info("recu #{} {} cle={} partition={} offset={} latence={} ms client={} total={} {}",
-                received.incrementAndGet(),
+                rank,
                 event.envelope().eventType(),
                 record.key(),
                 record.partition(),
@@ -78,22 +79,5 @@ public class OrderEventsListener {
                 event.customerId(),
                 event.totalAmount(),
                 event.currency());
-    }
-
-    /** Nombre d'evenements vus par CETTE instance depuis son demarrage (experience P1-T5). */
-    public long receivedCount() {
-        return received.get();
-    }
-
-    /** Repartition par partition, telle que vue par CETTE instance. */
-    public SortedMap<Integer, Long> countsByPartition() {
-        SortedMap<Integer, Long> snapshot = new TreeMap<>();
-        countsByPartition.forEach((partition, counter) -> snapshot.put(partition, counter.sum()));
-        return snapshot;
-    }
-
-    public void resetCounters() {
-        received.set(0);
-        countsByPartition.clear();
     }
 }
