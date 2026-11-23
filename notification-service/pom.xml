@@ -54,9 +54,17 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-jdbc</artifactId>
         </dependency>
+        <!--
+          PIEGE Spring Boot 4 : « flyway-core » apporte la BIBLIOTHEQUE, pas
+          l'auto-configuration. En Boot 4 les auto-configurations sont decoupees en modules
+          (FlywayAutoConfiguration vit dans spring-boot-flyway), donc avec flyway-core seul le
+          contexte demarre SANS RIEN DIRE et aucune migration n'est appliquee. Constate en
+          P4-T6 : la table processed_event n'existait pas, et chaque evenement partait en DLT
+          sur BadSqlGrammarException.
+        -->
         <dependency>
-            <groupId>org.flywaydb</groupId>
-            <artifactId>flyway-core</artifactId>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-flyway</artifactId>
         </dependency>
         <!-- Flyway 10+ exige un module par base de donnees, en plus de flyway-core. -->
         <dependency>

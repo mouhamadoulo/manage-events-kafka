@@ -57,6 +57,24 @@ class NotificationServiceApplicationTest {
     }
 
     @Test
+    @DisplayName("l'auto-configuration Flyway de Boot est au classpath")
+    void bootFlywayAutoConfigurationIsOnTheClasspath() {
+        // PIEGE Spring Boot 4, trouve en P4-T6 : « org.flywaydb:flyway-core » apporte la
+        // bibliotheque, PAS l'auto-configuration — elle vit dans le module spring-boot-flyway.
+        // Avec flyway-core seul, le contexte demarre sans rien dire et aucune migration n'est
+        // appliquee : la table processed_event n'existait pas, et chaque evenement partait en
+        // DLT sur BadSqlGrammarException.
+        //
+        // Ce test ne peut pas verifier qu'une migration s'applique (il n'y a pas de base ici).
+        // Il verifie la seule chose qui manquait : que le module d'auto-configuration est la.
+        assertThat(org.springframework.util.ClassUtils.isPresent(
+                "org.springframework.boot.flyway.autoconfigure.FlywayAutoConfiguration",
+                getClass().getClassLoader()))
+                .as("spring-boot-starter-flyway doit etre declare, pas seulement flyway-core")
+                .isTrue();
+    }
+
+    @Test
     @DisplayName("hors profil lab, l'injection de panne est neutre")
     void outsideTheLabProfileFaultInjectionIsNeutral() {
         // Si ce test echoue, un header pose par un producteur peut faire echouer ce service.
