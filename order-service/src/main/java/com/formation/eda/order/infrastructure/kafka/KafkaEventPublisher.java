@@ -2,6 +2,7 @@ package com.formation.eda.order.infrastructure.kafka;
 
 import com.formation.eda.events.DomainEvent;
 import com.formation.eda.events.EventEnvelope;
+import com.formation.eda.events.EventHeaders;
 import com.formation.eda.order.application.EventPublicationFailedException;
 import com.formation.eda.order.application.EventPublisher;
 import org.apache.kafka.clients.producer.ProducerRecord;
@@ -32,12 +33,13 @@ import java.util.concurrent.CompletionException;
 public class KafkaEventPublisher implements EventPublisher {
 
     // L'enveloppe est dans le payload, mais ces trois champs sont AUSSI en headers.
-    // WHY: un header se lit sans deserialiser le message. Un routeur, une DLQ ou un filtre de
-    // l'UI peuvent trier sur eventType sans connaitre la classe Java du payload. Le payload
-    // reste la source de verite ; les headers sont une commodite de transport.
-    public static final String HEADER_EVENT_ID = "eventId";
-    public static final String HEADER_EVENT_TYPE = "eventType";
-    public static final String HEADER_CORRELATION_ID = "correlationId";
+    // WHY ces alias plutot que des litteraux : les noms vivent desormais dans
+    // EventHeaders (common-events), parce qu'un nom de header est un element de contrat et
+    // que l'intercepteur d'idempotence de common-kafka doit lire exactement le meme.
+    // Deux chaines recopiees a la main divergeraient d'un caractere sans que rien n'echoue.
+    public static final String HEADER_EVENT_ID = EventHeaders.EVENT_ID;
+    public static final String HEADER_EVENT_TYPE = EventHeaders.EVENT_TYPE;
+    public static final String HEADER_CORRELATION_ID = EventHeaders.CORRELATION_ID;
 
     private static final Logger log = LoggerFactory.getLogger(KafkaEventPublisher.class);
 
