@@ -107,6 +107,16 @@ eda:
     blocking-jitter: 50ms
 
 server:
+  # Lie au LOOPBACK, pas a toutes les interfaces.
+  #
+  # WHY: Spring Boot ecoute par defaut sur 0.0.0.0. CLAUDE.md §1 impose que tout port du labo
+  # soit lie a 127.0.0.1 — la regle etait tenue pour les ports publies par Docker, pas pour les
+  # services lances sur l'hote. Or ce service expose /admin/dlt/replay, qui republie des
+  # messages dans un topic METIER et n'est pas authentifie : sur 0.0.0.0, n'importe quelle
+  # machine du reseau local peut injecter dans la saga.
+  # L'authentification elle-meme est P12-T8 ; le bind loopback est ce qui rend l'absence
+  # d'authentification acceptable en attendant.
+  address: ${SERVER_ADDRESS:127.0.0.1}
   port: ${SERVER_PORT:8095}
 
 management:

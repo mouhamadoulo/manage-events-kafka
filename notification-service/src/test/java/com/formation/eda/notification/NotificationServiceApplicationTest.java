@@ -47,6 +47,9 @@ class NotificationServiceApplicationTest {
     @Autowired
     private KafkaListenerEndpointRegistry registry;
 
+    @org.springframework.beans.factory.annotation.Value("${server.address}")
+    private String serverAddress;
+
     @Test
     @DisplayName("le contexte demarre avec la mecanique de fiabilite branchee")
     void contextLoadsWithReliabilityWiredIn() {
@@ -72,6 +75,15 @@ class NotificationServiceApplicationTest {
                 getClass().getClassLoader()))
                 .as("spring-boot-starter-flyway doit etre declare, pas seulement flyway-core")
                 .isTrue();
+    }
+
+    @Test
+    @DisplayName("le service est lie au loopback")
+    void theServiceIsBoundToLoopback() {
+        // /admin/dlt/replay republie dans un topic METIER et n'est pas authentifie (P12-T8).
+        // Spring Boot ecoute par defaut sur 0.0.0.0 : sans ce bind, n'importe quelle machine du
+        // reseau local peut injecter dans la saga. CLAUDE.md §1.
+        assertThat(serverAddress).isEqualTo("127.0.0.1");
     }
 
     @Test

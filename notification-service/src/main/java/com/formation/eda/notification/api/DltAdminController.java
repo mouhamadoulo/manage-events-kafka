@@ -22,10 +22,16 @@ import java.util.List;
  * Console d'administration du dead letter topic : regarder, puis rejouer.
  *
  * <p><b>Cette console n'est pas authentifiee</b>, comme le reste du laboratoire : Kafka UI
- * tourne avec {@code DYNAMIC_CONFIG_ENABLED}, Postgres est en {@code eda/eda}, et tous les
- * ports publies sont lies a {@code 127.0.0.1}. Ce qui la rend acceptable ici est exactement
- * cela — et rien d'autre. Elle peut republier des messages dans un topic metier : exposee sur
- * le reseau, c'est un moyen d'injection. La mettre derriere un jeton est <b>P12-T8</b>.
+ * tourne avec {@code DYNAMIC_CONFIG_ENABLED} et Postgres est en {@code eda/eda}. Ce qui la rend
+ * acceptable ici est que le service est lie au <b>loopback</b> ({@code server.address} dans
+ * l'{@code application.yml}) — et rien d'autre. Elle peut republier des messages dans un topic
+ * metier : exposee sur le reseau, c'est un moyen d'injection. La mettre derriere un jeton est
+ * <b>P12-T8</b>.
+ *
+ * <p>Ce bind a ete ajoute apres coup : la premiere version de ce javadoc affirmait que le
+ * service n'ecoutait que sur {@code 127.0.0.1}, alors que Spring Boot ecoute par defaut sur
+ * {@code 0.0.0.0}. La regle de CLAUDE.md §1 etait tenue pour les ports publies par Docker, pas
+ * pour les services lances sur l'hote.
  *
  * <p>Deux garde-fous qui restent valables quoi qu'il arrive :
  * <ul>
