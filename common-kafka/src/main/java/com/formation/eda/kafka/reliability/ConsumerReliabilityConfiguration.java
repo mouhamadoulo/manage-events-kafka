@@ -7,8 +7,17 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.serialization.ByteArraySerializer;
+import org.apache.kafka.common.serialization.StringSerializer;
 import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
 import org.springframework.kafka.core.ConsumerFactory;
+import org.springframework.kafka.core.DefaultKafkaProducerFactory;
+import org.springframework.kafka.core.KafkaOperations;
+import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.kafka.core.ProducerFactory;
+import org.springframework.kafka.listener.DeadLetterPublishingRecoverer;
 import org.springframework.kafka.listener.ConsumerRecordRecoverer;
 import org.springframework.kafka.listener.ContainerPausingBackOffHandler;
 import org.springframework.kafka.listener.DefaultErrorHandler;
@@ -24,6 +33,11 @@ import org.springframework.util.backoff.ExponentialBackOff;
 import org.springframework.util.backoff.FixedBackOff;
 
 import java.time.Clock;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.function.BiFunction;
 
 /**
  * Mecanique de fiabilite consumer : classement des erreurs, retry, DLT, idempotence.
@@ -94,13 +108,7 @@ public class ConsumerReliabilityConfiguration {
         // NoSuchMethodException). On les redeclare quand meme : ce depot existe pour que le
         // classement se LISE dans le code, et un defaut de framework qui change en silence a
         // la version suivante ne doit pas changer notre comportement.
-        handler.addNotRetryableExceptions(
-                DeserializationException.class,
-                MethodArgumentResolutionException.class,
-                MessageConversionException.class,
-                ConversionException.class,
-                ClassCastException.class,
-                NonRetryableEventException.class);
+        FATAL_EXCEPTIONS.forEach(handler::addNotRetryableExceptions);
 
         // WHY explicite alors que tout est retryable par defaut : l'intention doit se lire
         // dans le code. Un lecteur ne doit pas avoir a connaitre le defaut du framework pour
@@ -121,6 +129,68 @@ public class ConsumerReliabilityConfiguration {
     }
 
     /**
+     * Exceptions qui envoient un message directement en dead letter topic, sans passer par les
+     * etages de retry.
+     *
+     * <p>Une seule liste, utilisee aux deux endroits qui doivent s'accorder : le classement du
+     * gestionnaire d'erreur, et le resolveur de destination. Deux listes separees pourraient
+     * divergér, et un message classe non-retryable mais route vers un etage de retry y
+     * resterait a tourner jusqu'a la DLT — 35 secondes pour rien.
+     */
+    static final List<Class<? extends Exception>> FATAL_EXCEPTIONS = List.of(
+            DeserializationException.class,
+            MethodArgumentResolutionException.class,
+            MessageConversionException.class,
+            ConversionException.class,
+            ClassCastException.class,
+            NonRetryableEventException.class);
+
+    /**
+     * @return {@code true} si {@code exception}, ou n'importe laquelle de ses causes, est un
+     *         echec definitif.
+     *
+     * <p>WHY parcourir les causes : le conteneur emballe l'exception du listener dans une
+     * {@code ListenerExecutionFailedException}, et un echec de deserialisation arrive
+     * lui-meme emballe. Tester le type de surface classerait tout comme retryable.
+     */
+    static boolean isFatal(Throwable exception) {
+        for (Throwable current = exception; current != null; current = cause(current)) {
+            for (Class<? extends Exception> fatal : FATAL_EXCEPTIONS) {
+                if (fatal.isInstance(current)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Ou part un message qui vient d'echouer : l'etage de retry suivant, ou directement la DLT
+     * si l'echec est definitif.
+     *
+     * <p>La partition est laissee a {@code -1} : le recoverer n'impose alors aucune partition et
+     * le partitionneur la choisit depuis la cle. L'ordre par agregat est donc conserve a
+     * l'interieur d'un etage. Imposer la partition d'origine casserait de toute facon la
+     * publication sur un {@code .dlt} qui n'a qu'une partition.
+     */
+    static BiFunction<ConsumerRecord<?, ?>, Exception, TopicPartition> destinationResolver(
+            ConsumerReliabilityProperties props) {
+        return (record, exception) -> {
+            String topic = record.topic();
+            // Rien ne consomme la DLT, mais un routage qui la renverrait vers un etage
+            // creerait une boucle : .dlt -> .retry-1 -> .retry-2 -> .dlt -> ...
+            if (isFatal(exception) || RetryTopology.stageOf(topic) < 0) {
+                return new TopicPartition(RetryTopology.deadLetterOf(topic), -1);
+            }
+            return new TopicPartition(RetryTopology.next(topic, props.stageCount()), -1);
+        };
+    }
+
+    private static Throwable cause(Throwable exception) {
+        return exception.getCause() == exception ? null : exception.getCause();
+    }
+
+    /**
      * Horloge injectable : les tests du differe ont besoin d'une {@link Clock#fixed} pour
      * asserter une duree restante exacte plutot qu'un intervalle approximatif.
      */
@@ -128,6 +198,68 @@ public class ConsumerReliabilityConfiguration {
     @ConditionalOnMissingBean(Clock.class)
     Clock systemClock() {
         return Clock.systemUTC();
+    }
+
+    @Bean
+    DiagnosticHeaders diagnosticHeaders(Clock clock) {
+        return new DiagnosticHeaders(clock);
+    }
+
+    /**
+     * Template de publication des payloads <b>bruts</b>.
+     *
+     * <p>WHY un second template : un echec de deserialisation n'a pas d'objet a republier,
+     * seulement les octets d'origine, que le recoverer recupere dans la
+     * {@code DeserializationException}. Les passer au serialiseur JSON Schema echouerait une
+     * seconde fois — et cette fois a l'interieur du mecanisme qui devait sauver le message.
+     *
+     * <p>La configuration est copiee de celle du producteur du service (meme broker, memes
+     * reglages de fiabilite), en remplacant les seuls serialiseurs.
+     */
+    @Bean
+    KafkaTemplate<String, byte[]> byteArrayDltTemplate(ProducerFactory<?, ?> producerFactory) {
+        Map<String, Object> configs = new HashMap<>(producerFactory.getConfigurationProperties());
+        configs.put(org.apache.kafka.clients.producer.ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG,
+                StringSerializer.class);
+        configs.put(org.apache.kafka.clients.producer.ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG,
+                ByteArraySerializer.class);
+        return new KafkaTemplate<>(new DefaultKafkaProducerFactory<>(configs));
+    }
+
+    /**
+     * Publie un message en echec vers l'etage de retry suivant, ou vers la DLT.
+     *
+     * <p>Le template est choisi par <b>type de payload</b> : les octets bruts d'un echec de
+     * deserialisation passent par le serialiseur ByteArray, tout le reste par le template du
+     * service (JSON Schema, dont le sujet {@code ....dlt-OrderPlaced} est deja enregistre
+     * depuis P2-T3).
+     *
+     * <p>{@code setAppendOriginalHeaders(false)} : sans cela, les headers
+     * {@code kafka_dlt-original-*} s'empilent a chaque etage et un message en DLT en porte
+     * trois jeux. Nos propres {@code x-origin-*}, eux, sont poses une seule fois par
+     * {@link DiagnosticHeaders}.
+     */
+    @Bean
+    DeadLetterPublishingRecoverer deadLetterPublishingRecoverer(
+            KafkaTemplate<?, ?> kafkaTemplate,
+            KafkaTemplate<String, byte[]> byteArrayDltTemplate,
+            ConsumerReliabilityProperties props,
+            DiagnosticHeaders diagnosticHeaders) {
+
+        // LinkedHashMap : le recoverer parcourt les entrees dans l'ordre et prend la premiere
+        // dont la classe accepte le payload. Object.class accepterait aussi un byte[].
+        Map<Class<?>, KafkaOperations<?, ?>> templates = new LinkedHashMap<>();
+        templates.put(byte[].class, byteArrayDltTemplate);
+        templates.put(Object.class, kafkaTemplate);
+
+        DeadLetterPublishingRecoverer recoverer =
+                new DeadLetterPublishingRecoverer(templates, destinationResolver(props));
+        recoverer.setHeadersFunction(diagnosticHeaders);
+        recoverer.setAppendOriginalHeaders(false);
+        // WHY: sans cela, une publication en DLT qui echoue est journalisee et oubliee. Le
+        // message disparait alors que tout le mecanisme existait pour le garder.
+        recoverer.setFailIfSendResultIsError(true);
+        return recoverer;
     }
 
     @Bean
@@ -203,13 +335,7 @@ public class ConsumerReliabilityConfiguration {
         // Retryable, impérativement : non-retryable, un record arrive trop tot partirait en DLT
         // au premier passage.
         handler.addRetryableExceptions(NotYetDueException.class);
-        handler.addNotRetryableExceptions(
-                DeserializationException.class,
-                MethodArgumentResolutionException.class,
-                MessageConversionException.class,
-                ConversionException.class,
-                ClassCastException.class,
-                NonRetryableEventException.class);
+        FATAL_EXCEPTIONS.forEach(handler::addNotRetryableExceptions);
         handler.setCommitRecovered(true);
 
         // Explicite plutot qu'herite du defaut : le compteur de tentatives d'un record est
