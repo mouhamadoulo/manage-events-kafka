@@ -1,5 +1,6 @@
 package com.formation.eda.kafka.reliability;
 
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -9,12 +10,20 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
 import org.springframework.kafka.core.ConsumerFactory;
 import org.springframework.kafka.listener.ConsumerRecordRecoverer;
+import org.springframework.kafka.listener.ContainerPausingBackOffHandler;
 import org.springframework.kafka.listener.DefaultErrorHandler;
+import org.springframework.kafka.listener.ListenerContainerPauseService;
+import org.springframework.kafka.listener.ListenerContainerRegistry;
 import org.springframework.kafka.support.converter.ConversionException;
 import org.springframework.kafka.support.serializer.DeserializationException;
 import org.springframework.messaging.converter.MessageConversionException;
 import org.springframework.messaging.handler.invocation.MethodArgumentResolutionException;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
+import org.springframework.util.backoff.BackOff;
 import org.springframework.util.backoff.ExponentialBackOff;
+import org.springframework.util.backoff.FixedBackOff;
+
+import java.time.Clock;
 
 /**
  * Mecanique de fiabilite consumer : classement des erreurs, retry, DLT, idempotence.
@@ -109,6 +118,133 @@ public class ConsumerReliabilityConfiguration {
     DefaultErrorHandler mainErrorHandler(ConsumerRecordRecoverer recoverer,
                                          ConsumerReliabilityProperties props) {
         return blockingErrorHandler(recoverer, props);
+    }
+
+    /**
+     * Horloge injectable : les tests du differe ont besoin d'une {@link Clock#fixed} pour
+     * asserter une duree restante exacte plutot qu'un intervalle approximatif.
+     */
+    @Bean
+    @ConditionalOnMissingBean(Clock.class)
+    Clock systemClock() {
+        return Clock.systemUTC();
+    }
+
+    @Bean
+    RetryStageSupport retryStageSupport(ConsumerReliabilityProperties props, Clock clock) {
+        return new RetryStageSupport(props, clock);
+    }
+
+    /**
+     * Ordonnanceur dedie a la reprise des partitions mises en pause.
+     *
+     * <p>WHY un bean a nous et non le {@code TaskScheduler} de Boot : Boot n'en configure un que
+     * si l'application active l'ordonnancement ({@code @EnableScheduling}). Un service qui
+     * importe cette configuration sans ordonnancement n'aurait aucun {@code TaskScheduler}, et
+     * le contexte echouerait au demarrage sur une dependance manquante — pour un mecanisme qui
+     * n'a besoin que de poser un reveil.
+     *
+     * <p>Un seul thread suffit : il ne fait qu'appeler {@code resume} a l'echeance.
+     */
+    @Bean
+    ThreadPoolTaskScheduler retryPauseScheduler() {
+        ThreadPoolTaskScheduler scheduler = new ThreadPoolTaskScheduler();
+        scheduler.setPoolSize(1);
+        scheduler.setThreadNamePrefix("retry-pause-");
+        // Sans cela, l'arret de l'application n'attend pas les reprises en vol et une partition
+        // peut rester en pause jusqu'au prochain demarrage.
+        scheduler.setWaitForTasksToCompleteOnShutdown(true);
+        scheduler.setAwaitTerminationSeconds(5);
+        return scheduler;
+    }
+
+    @Bean
+    ListenerContainerPauseService listenerContainerPauseService(
+            ListenerContainerRegistry registry,
+            ThreadPoolTaskScheduler retryPauseScheduler) {
+        return new ListenerContainerPauseService(registry, retryPauseScheduler);
+    }
+
+    /**
+     * Gestionnaire d'erreur des conteneurs d'etage de retry.
+     *
+     * <p>Deux comportements dans un seul objet, distingues par le type d'exception :
+     *
+     * <ol>
+     *   <li>{@link NotYetDueException} — le record est arrive trop tot. Le backoff vaut
+     *       exactement la duree restante, et le {@link PartitionPausingBackOffHandler} met
+     *       sa partition en pause au lieu de faire dormir le thread. L'offset n'est pas
+     *       commite : le record est redelivre a la reprise, il est alors du, et il passe.
+     *   <li><b>tout le reste</b> — un echec reel dans un etage de retry. Zero reessai
+     *       bloquant : le record part immediatement vers l'etage suivant, ou vers la DLT.
+     *       WHY zero : le delai de l'etage <i>est</i> l'attente. Y ajouter un backoff
+     *       bloquant ferait attendre deux fois, dont une en occupant le thread.
+     * </ol>
+     *
+     * <p>WHY {@code setBackOffFunction} et non un backoff fixe : la fonction recoit le record
+     * <b>et l'exception</b>. C'est la seule facon d'attendre la duree restante propre a chaque
+     * record — sans elle, il faudrait un pas fixe et re-verifier l'echeance a chaque reveil.
+     */
+    @Bean
+    DefaultErrorHandler retryErrorHandler(ConsumerRecordRecoverer recoverer,
+                                          ListenerContainerPauseService pauseService) {
+        BackOff straightToNextStage = new FixedBackOff(0L, 0L);
+        DefaultErrorHandler handler = new DefaultErrorHandler(
+                recoverer, straightToNextStage, new PartitionPausingBackOffHandler(pauseService));
+
+        handler.setBackOffFunction((record, exception) ->
+                rootNotYetDue(exception) instanceof NotYetDueException notYetDue
+                        // 3 tentatives et non 1 : une horloge qui derive de quelques
+                        // millisecondes entre le producteur et le consumer ferait sinon partir
+                        // en DLT un message dont le seul tort est d'etre arrive trop tot.
+                        ? new FixedBackOff(notYetDue.remainingMillis(), 3L)
+                        : straightToNextStage);
+
+        // Retryable, impérativement : non-retryable, un record arrive trop tot partirait en DLT
+        // au premier passage.
+        handler.addRetryableExceptions(NotYetDueException.class);
+        handler.addNotRetryableExceptions(
+                DeserializationException.class,
+                MethodArgumentResolutionException.class,
+                MessageConversionException.class,
+                ConversionException.class,
+                ClassCastException.class,
+                NonRetryableEventException.class);
+        handler.setCommitRecovered(true);
+
+        // Explicite plutot qu'herite du defaut : le compteur de tentatives d'un record est
+        // remis a zero quand l'exception change. C'est ce qui empeche une attente d'echeance de
+        // consommer les tentatives d'un echec reel survenu juste apres.
+        handler.setResetStateOnExceptionChange(true);
+
+        return handler;
+    }
+
+    @Bean
+    ConcurrentKafkaListenerContainerFactory<String, Object> retryContainerFactory(
+            ConsumerFactory<?, ?> consumerFactory,
+            @Qualifier("retryErrorHandler") DefaultErrorHandler retryErrorHandler,
+            IdempotentRecordInterceptor idempotentRecordInterceptor) {
+
+        ConcurrentKafkaListenerContainerFactory<String, Object> factory =
+                new ConcurrentKafkaListenerContainerFactory<>();
+        factory.setConsumerFactory(typed(consumerFactory));
+        factory.setCommonErrorHandler(retryErrorHandler);
+        factory.setRecordInterceptor(idempotentRecordInterceptor);
+        return factory;
+    }
+
+    /**
+     * Le conteneur enveloppe l'exception du listener dans une
+     * {@code ListenerExecutionFailedException}. Sans ce deballage, le differe ne serait jamais
+     * reconnu et chaque record non echu partirait a l'etage suivant immediatement.
+     */
+    static Throwable rootNotYetDue(Throwable exception) {
+        Throwable current = exception;
+        while (current != null && !(current instanceof NotYetDueException)) {
+            current = current.getCause() == current ? null : current.getCause();
+        }
+        return current;
     }
 
     @Bean

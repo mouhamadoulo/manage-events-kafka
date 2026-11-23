@@ -2,10 +2,12 @@ package com.formation.eda.kafka.reliability;
 
 import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.common.TopicPartition;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.kafka.listener.DefaultErrorHandler;
+import org.springframework.kafka.listener.ListenerContainerPauseService;
 import org.springframework.kafka.listener.ListenerExecutionFailedException;
 import org.springframework.kafka.listener.MessageListenerContainer;
 import org.springframework.kafka.support.serializer.DeserializationException;
@@ -16,7 +18,12 @@ import java.util.ArrayList;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 /**
  * Le classement des exceptions est la decision la plus consequente de la phase 4 : une
@@ -95,6 +102,74 @@ class ErrorClassificationTest {
         assertThat(backOff.getMaxAttempts()).isEqualTo(2L);
     }
 
+    @Test
+    @DisplayName("sur un etage de retry, un record non echu met sa partition en pause sans etre recupere")
+    void anUndueRecordPausesItsPartitionInsteadOfBeingRecovered() {
+        ListenerContainerPauseService pauseService = mock(ListenerContainerPauseService.class);
+        DefaultErrorHandler retryHandler = new ConsumerReliabilityConfiguration()
+                .retryErrorHandler((record, exception) -> recovered.add(record), pauseService);
+
+        // L'exception arrive EMBALLEE par le conteneur : sans deballage, le differe ne serait
+        // pas reconnu et le record partirait a l'etage suivant immediatement.
+        boolean wasRecovered = retryHandler.handleOne(
+                failure(new NotYetDueException(4000, RETRY_PARTITION)),
+                RETRY_RECORD, consumer, container);
+
+        assertThat(wasRecovered).isFalse();
+        assertThat(recovered).isEmpty();
+        verify(pauseService).pausePartition(container, RETRY_PARTITION, Duration.ofMillis(4000));
+        // Et surtout PAS pause(container) : le handler de spring-kafka
+        // (ContainerPausingBackOffHandler) suspendrait toutes les partitions assignees, dont
+        // celles dont les records sont deja echus.
+        verify(pauseService, never()).pause(any(MessageListenerContainer.class), any(Duration.class));
+    }
+
+    @Test
+    @DisplayName("sans partition connue, l'attente retombe sur le handler qui fait dormir le thread")
+    void withoutAKnownPartitionTheWaitFallsBackToThreadSleeping() {
+        ListenerContainerPauseService pauseService = mock(ListenerContainerPauseService.class);
+        PartitionPausingBackOffHandler handler = new PartitionPausingBackOffHandler(pauseService);
+
+        // DefaultBackOffHandler dort par tranches tant que le conteneur tourne : sans ce stub,
+        // il rendrait la main immediatement et le test ne mesurerait rien.
+        when(container.isRunning()).thenReturn(true);
+
+        long before = System.currentTimeMillis();
+        handler.onNextBackOff(container, failure(new NotYetDueException(30)), 30L);
+
+        assertThat(System.currentTimeMillis() - before).isGreaterThanOrEqualTo(25L);
+        verifyNoInteractions(pauseService);
+    }
+
+    @Test
+    @DisplayName("sur un etage de retry, un echec reel part immediatement a la destination suivante")
+    void arealFailureOnARetryStageGoesStraightToTheNextDestination() {
+        ListenerContainerPauseService pauseService = mock(ListenerContainerPauseService.class);
+        DefaultErrorHandler retryHandler = new ConsumerReliabilityConfiguration()
+                .retryErrorHandler((record, exception) -> recovered.add(record), pauseService);
+
+        // Zero reessai bloquant sur un etage : le delai de l'etage EST l'attente.
+        boolean wasRecovered = retryHandler.handleOne(
+                failure(new TransientProcessingException("toujours injoignable", null)),
+                RETRY_RECORD, consumer, container);
+
+        assertThat(wasRecovered).isTrue();
+        assertThat(recovered).hasSize(1);
+        verifyNoInteractions(pauseService);
+    }
+
+    @Test
+    @DisplayName("rootNotYetDue traverse les causes et ignore les autres exceptions")
+    void rootNotYetDueWalksTheCauseChain() {
+        NotYetDueException notYetDue = new NotYetDueException(1);
+
+        assertThat(ConsumerReliabilityConfiguration.rootNotYetDue(notYetDue)).isSameAs(notYetDue);
+        assertThat(ConsumerReliabilityConfiguration.rootNotYetDue(
+                new IllegalStateException("enveloppe", notYetDue))).isSameAs(notYetDue);
+        assertThat(ConsumerReliabilityConfiguration.rootNotYetDue(
+                new IllegalStateException("sans differe"))).isNull();
+    }
+
     /** Le conteneur enveloppe toujours l'exception du listener. */
     private static Exception failure(Exception cause) {
         return new ListenerExecutionFailedException("echec du listener", cause);
@@ -106,4 +181,10 @@ class ErrorClassificationTest {
 
     private static final ConsumerRecord<String, Object> RECORD =
             new ConsumerRecord<>("shop.order.events.v1", 0, 42L, "order-1", "payload");
+
+    private static final ConsumerRecord<String, Object> RETRY_RECORD =
+            new ConsumerRecord<>("shop.order.events.v1.retry-1", 0, 7L, "order-1", "payload");
+
+    private static final TopicPartition RETRY_PARTITION =
+            new TopicPartition("shop.order.events.v1.retry-1", 0);
 }
