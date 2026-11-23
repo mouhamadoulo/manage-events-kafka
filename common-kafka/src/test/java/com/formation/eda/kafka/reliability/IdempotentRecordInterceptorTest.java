@@ -126,6 +126,43 @@ class IdempotentRecordInterceptorTest {
         assertThat(interceptor.intercept(record, consumer)).isNotNull();
     }
 
+    @Test
+    @DisplayName("un echec sur un record non deduplique ne retire pas la marque posee par un autre")
+    void failureOnANonDeduplicatedRecordKeepsTheExistingMark() {
+        String eventId = UUID.randomUUID().toString();
+        Consumer<String, Object> consumer = consumerOf(GROUP);
+
+        // Livraison normale : traitee, marque posee.
+        interceptor.intercept(record(TOPIC, eventId), consumer);
+        interceptor.afterRecord(record(TOPIC, eventId), consumer);
+
+        // Copie illisible du MEME evenement : passe sans deduplication (payload nul), puis
+        // echoue. Elle ne doit pas pouvoir effacer la marque d'un travail deja fait.
+        ConsumerRecord<String, Object> poison = new ConsumerRecord<>(
+                TOPIC, 0, 7L, 0L, TimestampType.CREATE_TIME, -1, -1,
+                "order-1", null, headersWith(eventId), Optional.empty());
+        interceptor.intercept(poison, consumer);
+        interceptor.failure(poison, new RuntimeException("payload illisible"), consumer);
+
+        assertThat(interceptor.intercept(record(TOPIC, eventId), consumer)).isNull();
+    }
+
+    @Test
+    @DisplayName("un echec sur un doublon saute ne retire pas la marque")
+    void failureOnASkippedDuplicateKeepsTheMark() {
+        String eventId = UUID.randomUUID().toString();
+        Consumer<String, Object> consumer = consumerOf(GROUP);
+
+        interceptor.intercept(record(TOPIC, eventId), consumer);
+        interceptor.afterRecord(record(TOPIC, eventId), consumer);
+
+        ConsumerRecord<String, Object> duplicate = record(TOPIC, eventId);
+        assertThat(interceptor.intercept(duplicate, consumer)).isNull();
+        interceptor.failure(duplicate, new RuntimeException("ne devrait pas arriver"), consumer);
+
+        assertThat(interceptor.intercept(record(TOPIC, eventId), consumer)).isNull();
+    }
+
     private static ConsumerRecord<String, Object> record(String topic, String eventId) {
         return new ConsumerRecord<>(
                 topic, 0, 0L, 0L, TimestampType.CREATE_TIME, -1, -1,

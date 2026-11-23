@@ -44,6 +44,24 @@ public class IdempotentRecordInterceptor implements RecordInterceptor<String, Ob
 
     private final ProcessedEventStore store;
 
+    /**
+     * Marque posee par CE thread pour le record en cours, ou {@code null} s'il n'en a pose
+     * aucune.
+     *
+     * <p>WHY ce suivi plutot que relire l'{@code eventId} du header dans {@link #failure} :
+     * {@code failure()} ne doit defaire que ce que {@code intercept()} a fait. Sans cela, un
+     * record passe <b>sans</b> deduplication — payload nul, header illisible — mais portant un
+     * {@code eventId} deja traite effacerait la marque d'un travail deja fait. Une copie
+     * illisible d'un evenement suffirait alors a le faire rejouer : exactement le doublon que
+     * cette classe empeche, declenchable par un producteur bogue qui republie un payload casse
+     * sous un eventId deja utilise.
+     *
+     * <p>Un {@link ThreadLocal} suffit : spring-kafka traite un record a la fois par thread de
+     * consumer, et {@code intercept}, {@code failure} et {@code afterRecord} tournent sur ce
+     * meme thread.
+     */
+    private final ThreadLocal<UUID> markedByThisThread = new ThreadLocal<>();
+
     public IdempotentRecordInterceptor(ProcessedEventStore store) {
         this.store = store;
     }
@@ -51,6 +69,8 @@ public class IdempotentRecordInterceptor implements RecordInterceptor<String, Ob
     @Override
     public ConsumerRecord<String, Object> intercept(ConsumerRecord<String, Object> record,
                                                     Consumer<String, Object> consumer) {
+        markedByThisThread.remove();
+
         // Valeur nulle : soit un tombstone (legitime sur un topic compacte), soit un echec de
         // deserialisation passe par ErrorHandlingDeserializer. Dans les deux cas l'eventId du
         // header n'est pas une identite fiable : on laisse le listener et le classement
@@ -66,6 +86,7 @@ public class IdempotentRecordInterceptor implements RecordInterceptor<String, Ob
 
         String consumerGroup = consumer.groupMetadata().groupId();
         if (store.markProcessed(eventId, consumerGroup, record.topic())) {
+            markedByThisThread.set(eventId);
             return record;
         }
 
@@ -77,11 +98,20 @@ public class IdempotentRecordInterceptor implements RecordInterceptor<String, Ob
     @Override
     public void failure(ConsumerRecord<String, Object> record, Exception exception,
                         Consumer<String, Object> consumer) {
-        UUID eventId = eventIdOf(record);
-        if (eventId == null) {
+        UUID marked = markedByThisThread.get();
+        if (marked == null) {
+            // Ce record n'a pas ete deduplique par nous : rien a defaire. Relire l'eventId du
+            // header ici effacerait la marque d'un AUTRE traitement portant le meme eventId.
             return;
         }
-        store.forget(eventId, consumer.groupMetadata().groupId());
+        store.forget(marked, consumer.groupMetadata().groupId());
+    }
+
+    @Override
+    public void afterRecord(ConsumerRecord<String, Object> record, Consumer<String, Object> consumer) {
+        // Appele apres succes comme apres echec : c'est ici que le suivi par thread se nettoie,
+        // sinon un record ulterieur traite sur le meme thread verrait la marque du precedent.
+        markedByThisThread.remove();
     }
 
     /** @return l'eventId du header, ou {@code null} s'il est absent ou illisible. */
