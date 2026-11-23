@@ -1,10 +1,13 @@
 package com.formation.eda.order.api;
 
+import com.formation.eda.events.EventHeaders;
 import com.formation.eda.events.Topics;
 import com.formation.eda.events.order.OrderLine;
 import com.formation.eda.events.order.OrderPlaced;
 import com.formation.eda.kafka.json.EventJsonSchemaSerializer;
 import org.apache.kafka.clients.producer.ProducerConfig;
+import org.apache.kafka.clients.producer.RecordMetadata;
+import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -215,5 +218,86 @@ public class LabProducerController {
 
         log.info("rafale terminee : {}", result);
         return result;
+    }
+
+    /** Ce qu'une publication unitaire a produit. */
+    public record SingleResult(
+            String eventId,
+            String orderId,
+            String topic,
+            int partition,
+            long offset,
+            Integer failTimes,
+            Boolean failFatal) {
+    }
+
+    /**
+     * Publie UN evenement, avec les headers d'injection de panne de la phase 4.
+     *
+     * <p>WHY cet endpoint existe : l'effet metier de notification-service est un compteur en
+     * memoire, donc rien ne peut y echouer. Sans declencheur, les etages de retry, la branche
+     * « erreur metier » de la DLT et le rejeu selectif n'auraient aucun moyen d'etre mesures.
+     *
+     * <p>Les headers ne sont lus par le consumer que sous profil {@code lab} : une panne ne
+     * doit pas pouvoir etre commandee depuis un message en fonctionnement normal.
+     *
+     * @param failTimes nombre d'echecs transitoires a provoquer avant de reussir. 3 suffit a
+     *                  traverser les deux etages et atteindre la DLT.
+     * @param failFatal provoque un echec definitif : DLT immediate, sans etage de retry.
+     */
+    @PostMapping("/one")
+    public SingleResult one(
+            @RequestParam(required = false) Integer failTimes,
+            @RequestParam(required = false) Boolean failFatal,
+            @RequestParam(required = false) String orderId) {
+
+        Map<String, Object> config = new HashMap<>();
+        config.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
+        config.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
+        config.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, EventJsonSchemaSerializer.class);
+        config.put("schema.registry.url", schemaRegistryUrl);
+        config.put(ProducerConfig.ACKS_CONFIG, "all");
+        config.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true);
+
+        OrderPlaced event = OrderPlaced.of(
+                orderId == null ? "order-lab-" + System.nanoTime() : orderId,
+                "customer-lab",
+                List.of(new OrderLine("SKU-LAB", 1, new BigDecimal("4.20"))),
+                "EUR");
+
+        ProducerRecord<String, Object> record =
+                new ProducerRecord<>(Topics.ORDER_EVENTS, null, event.partitionKey(), event);
+        // Les memes trois headers que KafkaEventPublisher : sans eventId, l'intercepteur
+        // d'idempotence du consumer traiterait le message SANS dedupliquer.
+        header(record, EventHeaders.EVENT_ID, event.envelope().eventId().toString());
+        header(record, EventHeaders.EVENT_TYPE, event.envelope().eventType());
+        header(record, EventHeaders.CORRELATION_ID, event.envelope().correlationId());
+        if (failTimes != null) {
+            header(record, EventHeaders.FAIL_TIMES, String.valueOf(failTimes));
+        }
+        if (Boolean.TRUE.equals(failFatal)) {
+            header(record, EventHeaders.FAIL_FATAL, "true");
+        }
+
+        ProducerFactory<String, Object> factory = new DefaultKafkaProducerFactory<>(config);
+        try {
+            RecordMetadata metadata = new KafkaTemplate<>(factory).send(record).join().getRecordMetadata();
+            log.info("publication unitaire eventId={} failTimes={} failFatal={} -> {}-{} offset={}",
+                    event.envelope().eventId(), failTimes, failFatal,
+                    metadata.topic(), metadata.partition(), metadata.offset());
+            return new SingleResult(
+                    event.envelope().eventId().toString(), event.orderId(),
+                    metadata.topic(), metadata.partition(), metadata.offset(),
+                    failTimes, failFatal);
+        } finally {
+            factory.reset();
+            if (factory instanceof DefaultKafkaProducerFactory<String, Object> defaultFactory) {
+                defaultFactory.destroy();
+            }
+        }
+    }
+
+    private static void header(ProducerRecord<String, ?> record, String name, String value) {
+        record.headers().add(name, value.getBytes(java.nio.charset.StandardCharsets.UTF_8));
     }
 }

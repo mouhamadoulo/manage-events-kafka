@@ -3,6 +3,11 @@
 -- Migration PARTAGEE : elle vit dans le jar de common-kafka et chaque service qui a une base
 -- l'applique en ajoutant classpath:db/migration/shared a spring.flyway.locations. Les 5
 -- services de la saga (phase 6) heritent donc de la meme table sans la recopier.
+--
+-- Les versions 1 a 99 sont RESERVEES aux migrations partagees. Un service qui ajoute les
+-- siennes les place dans un emplacement FRERE (jamais imbrique dans celui-ci : Flyway ecarte
+-- une sous-location) et numerote a partir de 100 — deux migrations de meme version, meme dans
+-- des emplacements differents, font refuser le demarrage.
 create table processed_event (
     event_id       uuid        not null,
     consumer_group text        not null,

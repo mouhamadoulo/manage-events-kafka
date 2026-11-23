@@ -1,12 +1,10 @@
 package com.formation.eda.kafka.reliability;
 
 import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.jdbc.core.simple.JdbcClient;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
@@ -56,6 +54,13 @@ import java.util.function.BiFunction;
  *       et ce depot existe pour expliquer ;
  *   <li>en phase 6, les 5 services de la saga prendront chacun ce qu'ils veulent.
  * </ul>
+ *
+ * <p>Le service doit fournir un bean {@link ProcessedEventStore}. WHY ne pas le fournir ici
+ * sous condition : {@code @ConditionalOnBean(JdbcClient.class)} dans une configuration
+ * utilisateur est evalue AVANT les auto-configurations, donc la condition serait toujours
+ * fausse et le bean jamais cree. Et sans condition, un service sans base ne pourrait plus
+ * importer cette configuration. Le registre depend de la persistance du service : c'est au
+ * service de le declarer.
  */
 @Configuration(proxyBeanMethods = false)
 @EnableConfigurationProperties(ConsumerReliabilityProperties.class)
@@ -216,6 +221,27 @@ public class ConsumerReliabilityConfiguration {
      * <p>La configuration est copiee de celle du producteur du service (meme broker, memes
      * reglages de fiabilite), en remplacant les seuls serialiseurs.
      */
+    /**
+     * Template de publication des payloads <b>typés</b>, avec le serialiseur du service.
+     *
+     * <p>WHY declarer ce template alors que Boot en fournit un : le bean {@code kafkaTemplate}
+     * de {@code KafkaAutoConfiguration} est {@code @ConditionalOnMissingBean(KafkaTemplate.class)}.
+     * Des que ce module declare {@code byteArrayDltTemplate}, celui de Boot <b>n'est plus
+     * cree</b>. Le recoverer recevait alors le meme template pour les deux types de payload et
+     * echouait sur
+     * {@code SerializationException: Can't convert value of class OrderPlaced to class
+     * ByteArraySerializer} — bug trouve par {@code RetryChainTest}, invisible en test unitaire.
+     */
+    @Bean
+    KafkaTemplate<String, Object> eventDltTemplate(ProducerFactory<?, ?> producerFactory) {
+        return new KafkaTemplate<>(typedProducer(producerFactory));
+    }
+
+    @SuppressWarnings("unchecked")
+    private static ProducerFactory<String, Object> typedProducer(ProducerFactory<?, ?> producerFactory) {
+        return (ProducerFactory<String, Object>) producerFactory;
+    }
+
     @Bean
     KafkaTemplate<String, byte[]> byteArrayDltTemplate(ProducerFactory<?, ?> producerFactory) {
         Map<String, Object> configs = new HashMap<>(producerFactory.getConfigurationProperties());
@@ -241,8 +267,8 @@ public class ConsumerReliabilityConfiguration {
      */
     @Bean
     DeadLetterPublishingRecoverer deadLetterPublishingRecoverer(
-            KafkaTemplate<?, ?> kafkaTemplate,
-            KafkaTemplate<String, byte[]> byteArrayDltTemplate,
+            @Qualifier("eventDltTemplate") KafkaTemplate<String, Object> eventDltTemplate,
+            @Qualifier("byteArrayDltTemplate") KafkaTemplate<String, byte[]> byteArrayDltTemplate,
             ConsumerReliabilityProperties props,
             DiagnosticHeaders diagnosticHeaders) {
 
@@ -250,7 +276,7 @@ public class ConsumerReliabilityConfiguration {
         // dont la classe accepte le payload. Object.class accepterait aussi un byte[].
         Map<Class<?>, KafkaOperations<?, ?>> templates = new LinkedHashMap<>();
         templates.put(byte[].class, byteArrayDltTemplate);
-        templates.put(Object.class, kafkaTemplate);
+        templates.put(Object.class, eventDltTemplate);
 
         DeadLetterPublishingRecoverer recoverer =
                 new DeadLetterPublishingRecoverer(templates, destinationResolver(props));
@@ -409,24 +435,4 @@ public class ConsumerReliabilityConfiguration {
         return (ConsumerFactory<String, Object>) consumerFactory;
     }
 
-    /**
-     * Implementation Postgres du registre d'idempotence, fournie seulement si le service a
-     * effectivement du JDBC.
-     *
-     * <p>WHY cette condition : {@code spring-boot-starter-jdbc} est {@code optional} dans ce
-     * module (cf. pom), donc {@link JdbcClient} peut etre absent du classpath du service.
-     * {@code @ConditionalOnClass} sur une classe imbriquee evite que la configuration
-     * englobante soit illisible dans ce cas. {@code @ConditionalOnMissingBean} laisse un
-     * service fournir son propre store — ce que fera un test, ou un service sans base.
-     */
-    @Configuration(proxyBeanMethods = false)
-    @ConditionalOnClass(JdbcClient.class)
-    static class JdbcProcessedEventStoreConfiguration {
-
-        @Bean
-        @ConditionalOnMissingBean(ProcessedEventStore.class)
-        ProcessedEventStore processedEventStore(JdbcClient jdbcClient) {
-            return new JdbcProcessedEventStore(jdbcClient);
-        }
-    }
 }

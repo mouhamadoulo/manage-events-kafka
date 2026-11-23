@@ -42,6 +42,62 @@
             <artifactId>spring-boot-starter-kafka-test</artifactId>
             <scope>test</scope>
         </dependency>
+
+        <!--
+          Persistance : redeclaree ICI parce qu'elle est <optional> dans common-kafka. Les 6
+          services dependent de common-kafka et 5 n'ont pas de base ; en portee compile,
+          FlywayAutoConfiguration y reclamerait une DataSource et leur contexte echouerait.
+          notification-service est le premier service du projet a avoir une base : la table
+          processed_event (P4-T1).
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-jdbc</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-core</artifactId>
+        </dependency>
+        <!-- Flyway 10+ exige un module par base de donnees, en plus de flyway-core. -->
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-database-postgresql</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!--
+          Le seul test d'integration de la phase 4 : la table processed_event contre un vrai
+          Postgres. L'INSERT ... ON CONFLICT DO NOTHING et le nombre de lignes affectees ne se
+          verifient pas sans la base — c'est elle qui arbitre.
+          La strategie de test complete (profil integration generalise) est la phase 10.
+        -->
+        <!--
+          Testcontainers 2.0.5 : les artefacts ont ete RENOMMES par rapport a la 1.x.
+          C'est « testcontainers-postgresql », pas « postgresql » — ce dernier n'existe plus et
+          Maven echoue sur une version manquante, puisque le BOM ne le gere pas.
+          La classe a aussi demenage : org.testcontainers.postgresql.PostgreSQLContainer,
+          non generique, remplace org.testcontainers.containers.PostgreSQLContainer<SELF>.
+        -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-testcontainers</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
