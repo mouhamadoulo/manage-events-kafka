@@ -123,6 +123,44 @@ class RetryStageSupportTest {
         assertThatCode(() -> support.requireDue(record)).doesNotThrowAnyException();
     }
 
+    @Test
+    @DisplayName("un x-origin-timestamp tres futur ne met pas la partition en pause pour des annees")
+    void aFarFutureOriginTimestampDoesNotPauseThePartitionForYears() {
+        // Le header vient du PRODUCTEUR : c'est une valeur non fiable. Sans borne, un
+        // timestamp a l'annee 2100 suspendrait la partition jusque-la.
+        ConsumerRecord<String, Object> record =
+                record(MAIN + ".retry-1", NOW.plusSeconds(3600 * 24 * 365));
+
+        assertThatCode(() -> support.requireDue(record)).doesNotThrowAnyException();
+    }
+
+    @Test
+    @DisplayName("l'attente ne depasse jamais le delai de l'etage")
+    void theWaitNeverExceedsTheStageDelay() {
+        // Origine legerement dans le futur : plausible avec une derive d'horloge entre le
+        // producteur et le consumer. L'attente reste bornee par le delai de l'etage.
+        ConsumerRecord<String, Object> record = record(MAIN + ".retry-1", NOW.plusSeconds(2));
+
+        assertThatThrownBy(() -> support.requireDue(record))
+                .isInstanceOf(NotYetDueException.class)
+                .extracting(e -> ((NotYetDueException) e).remainingMillis())
+                .isEqualTo(5_000L);
+    }
+
+    @Test
+    @DisplayName("un x-origin-timestamp negatif est traite immediatement")
+    void aNegativeOriginTimestampIsProcessedImmediately() {
+        Headers headers = new RecordHeaders();
+        headers.add(EventHeaders.ORIGIN_TIMESTAMP, "-9223372036854775808".getBytes(StandardCharsets.UTF_8));
+        ConsumerRecord<String, Object> record = new ConsumerRecord<>(
+                MAIN + ".retry-1", 0, 0L, NOW.toEpochMilli(), TimestampType.CREATE_TIME, -1, -1,
+                "order-1", "payload", headers, Optional.empty());
+
+        // Sans garde-fou, Long.MIN_VALUE + delai deborde et le signe du resultat decide du
+        // comportement par accident.
+        assertThatCode(() -> support.requireDue(record)).doesNotThrowAnyException();
+    }
+
     private static ConsumerRecord<String, Object> record(String topic, Instant originTimestamp) {
         Headers headers = new RecordHeaders();
         if (originTimestamp != null) {

@@ -59,8 +59,28 @@ public class RetryStageSupport {
         // WHY depuis le header et non depuis record.timestamp() : le timestamp du record est
         // l'instant de republication DANS l'etage. Compter depuis lui ferait repartir le delai
         // de zero a chaque republication, et un message pourrait attendre indefiniment.
-        long dueAt = origin.getAsLong() + delay.toMillis();
-        long remaining = dueAt - clock.millis();
+        long delayMillis = delay.toMillis();
+        long now = clock.millis();
+        long originMillis = origin.getAsLong();
+
+        // Ce header vient du PRODUCTEUR : c'est une valeur non fiable, et elle decide combien
+        // de temps une partition reste suspendue.
+        //   - une valeur negative ou absurde fait deborder originMillis + delayMillis, et le
+        //     SIGNE du resultat deciderait du comportement par accident ;
+        //   - une valeur tres future (annee 2100) suspendrait la partition jusque-la, donc
+        //     arreterait la consommation de l'etage avec un seul message.
+        // Hors plage, on traite immediatement : un message traite trop tot est un moindre mal
+        // qu'un etage de retry mort.
+        if (originMillis < 0 || originMillis > now + delayMillis) {
+            log.warn("header {} hors plage ({}) sur {}-{} offset={} : traitement immediat",
+                    EventHeaders.ORIGIN_TIMESTAMP, originMillis, record.topic(),
+                    record.partition(), record.offset());
+            return;
+        }
+
+        // Borne dure : l'attente ne depasse jamais le delai de l'etage, meme si les horloges du
+        // producteur et du consumer ont derive.
+        long remaining = Math.min(originMillis + delayMillis - now, delayMillis);
         if (remaining > 0) {
             // La partition voyage dans l'exception : le BackOffHandler qui appliquera la pause
             // ne recoit pas le record, et n'a aucun autre moyen de savoir quoi suspendre.
