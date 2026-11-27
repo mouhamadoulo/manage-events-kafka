@@ -36,7 +36,7 @@ Versions vérifiées sur Maven Central / Docker Hub le **2026-11-21**. Ne pas le
 - **Saga chorégraphiée**, pas d'orchestrateur central (pas de Camunda / Temporal).
 - **Outbox transactionnel** pour toute publication issue d'un changement d'état en base.
 - Projet **Maven multi-module**, un module = un service déployable.
-- **Tout port publié par Docker est lié à `127.0.0.1`.** L'infra locale est entièrement en PLAINTEXT, sans authentification, et Kafka UI tourne avec `DYNAMIC_CONFIG_ENABLED`. Sans bind loopback, n'importe quelle machine du réseau local pourrait lire et écrire dans les topics. Ne jamais republier un port sur `0.0.0.0` — l'authentification arrive en phase 12.
+- **Tout port est lié à `127.0.0.1`** — ceux publiés par Docker *et* ceux des services Spring (`server.address`, surchargeable par `SERVER_ADDRESS`). Spring Boot écoute par défaut sur `0.0.0.0` : la règle ne tenait donc que pour Docker jusqu'en P4-T7, alors que `POST /orders`, `/lab/producer/*` et `/admin/dlt/replay` écrivent tous dans des topics métier sans authentification. L'infra locale est entièrement en PLAINTEXT, sans authentification, et Kafka UI tourne avec `DYNAMIC_CONFIG_ENABLED`. Sans bind loopback, n'importe quelle machine du réseau local pourrait lire et écrire dans les topics. Ne jamais republier un port sur `0.0.0.0` — l'authentification arrive en phase 12.
 
 ---
 
@@ -96,8 +96,16 @@ docker compose -f infra/docker-compose.yml down -v
 ./mvnw -pl order-service -am clean verify
 ```
 
+Lancer un service **exige un `install` préalable** : `clean verify` ne publie rien dans le dépôt
+local, donc `-pl <module>` ne trouve pas les modules frères et sort sur
+`DependencyResolutionException`.
+
 ```powershell
-./mvnw -pl order-service spring-boot:run
+./mvnw install -DskipTests
+```
+
+```powershell
+./mvnw -pl order-service spring-boot:run -Dspring-boot.run.profiles=lab
 ```
 
 ```powershell
@@ -142,7 +150,14 @@ docker exec -it kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-serve
 
 - **Événements** = `record` Java immuable dans `common-events`, jamais d'entité JPA exposée dans un topic.
 - Chaque événement porte une **enveloppe** : `eventId` (UUID), `eventType`, `occurredAt`, `correlationId`, `causationId`, `aggregateId`, `version`.
-- **Idempotence consumer obligatoire** : table `processed_event (event_id PK, consumer_group, processed_at)`, insert avant traitement, `ON CONFLICT DO NOTHING` → skip.
+- **Idempotence consumer obligatoire** : table `processed_event`, clé primaire **composite**
+  `(event_id, consumer_group)`, insert avant traitement, `ON CONFLICT DO NOTHING` → skip.
+  La clé est composite parce que les 5 services de la saga lisent les mêmes topics dans 5
+  groupes différents : avec `event_id` seul, le premier service à traiter un événement le
+  marquerait pour tous les autres. `source_topic` est journalisé mais **hors de la clé** — un
+  record venu de `.retry-1` est le même événement, et l'y mettre ferait rejouer l'effet à
+  chaque étage. Corollaire : la marque est posée **avant** le traitement, donc tout chemin de
+  sortie du listener doit **lever** (cf. `docs/patterns/04-retry-dlq-idempotence.md`).
 - **Nommage** : événements au **passé** (`OrderPlaced`, `PaymentAuthorized`), commandes à l'**impératif** (`ReserveStock`). Un topic d'événements ne transporte pas de commandes.
 - **Pas de Lombok** sur les records ; Lombok toléré sur les entités JPA uniquement.
 - Config dans `application.yml`, hosts/secrets via variables d'env avec défaut local.
@@ -184,7 +199,16 @@ Ce projet sert à **apprendre**. Donc :
 - **PowerShell 5.1 ajoute un BOM UTF-8 quand on pipe vers un exécutable natif.** `$lignes | docker exec -i … kafka-console-producer.sh` produit une première clé `﻿order-A`, qui part sur une autre partition que `order-A` pour un affichage identique. Passer par un fichier (`Set-Content -Encoding ascii` puis `docker cp` et redirection dans le conteneur).
 - **Rediriger stderr d'un exécutable natif (`2>$null`, `2>&1`) en PowerShell 5.1** transforme chaque ligne en `ErrorRecord` et stoppe le script sous `$ErrorActionPreference = "Stop"`. Les outils Kafka écrivent des avertissements sur stderr en fonctionnement normal : passer `$ErrorActionPreference = "Continue"` autour de ces appels.
 - **Un consumer tué de force reste membre de son groupe ~45 s** (`session.timeout.ms`), faute de `LeaveGroup`. Pendant ce temps `--reset-offsets` est refusé (`group is inactive` attendu, `Stable` constaté) et les partitions ne sont pas réattribuées. Attendre l'état `Empty` (`--describe --state`), pas un `sleep` fixe.
-- **Testcontainers 2.0.5** : API majeure v2, signatures de `KafkaContainer` changées vs 1.x. Ne pas copier-coller des exemples 1.19/1.21.
+- **`org.flywaydb:flyway-core` seul n'applique AUCUNE migration.** Spring Boot 4 découpe ses auto-configurations en modules : `FlywayAutoConfiguration` vit dans `spring-boot-flyway`. Avec `flyway-core` seul, le contexte démarre **sans un mot**, la table n'existe pas, et l'erreur n'apparaît qu'au premier accès — ici chaque événement partait en DLT sur `BadSqlGrammarException`. Déclarer `spring-boot-starter-flyway`. Un test d'intégration qui lance Flyway par programme ne peut pas attraper ce défaut : garder un test qui vérifie la présence de la classe d'auto-configuration.
+- **Testcontainers 2.0.5** : API majeure v2, signatures de `KafkaContainer` changées vs 1.x. Ne pas copier-coller des exemples 1.19/1.21. Les **artefacts sont renommés** : `org.testcontainers:testcontainers-postgresql` et `testcontainers-junit-jupiter`, et non `postgresql` / `junit-jupiter` — ces derniers ne sont plus gérés par le BOM, et Maven sort sur « `dependencies.dependency.version` is missing ». La classe a aussi déménagé : `org.testcontainers.postgresql.PostgreSQLContainer`, non générique, remplace `org.testcontainers.containers.PostgreSQLContainer<SELF>`.
+- **Déclarer un bean `KafkaTemplate` supprime celui de Boot.** `KafkaAutoConfiguration.kafkaTemplate` est `@ConditionalOnMissingBean(KafkaTemplate.class)`. Un module qui déclare un template spécialisé (un `ByteArraySerializer` pour la DLT) prive donc tout le service du template normal — et un `DeadLetterPublishingRecoverer` configuré avec une map de deux templates reçoit alors le même objet pour les deux types de payload : `SerializationException: Can't convert value of class OrderPlaced to class ByteArraySerializer`, en boucle, aucun message n'atteint la DLT. Déclarer les deux templates explicitement.
+- **Flyway écarte une location qui est la sous-location d'une autre.** `locations: classpath:db/migration/shared,classpath:db/migration` donne `WARN Discarding location 'classpath:db/migration/shared' as it is a sub-location of 'classpath:db/migration'` : les deux se confondent, le script s'appelle `shared/V1__…`, et une migration locale nommée `V1__` entre en **collision de version**. Emplacements **frères**, et versions 1–99 réservées au partagé.
+- **`ContainerPausingBackOffHandler` met en pause TOUT le conteneur, pas la partition.** Il appelle `pauseService.pause(container, durée)`. Sur un `.retry-1` à 3 partitions, un seul record arrivé trop tôt retarde donc les deux autres partitions. Le handler du framework n'a aucun moyen de faire mieux : `BackOffHandler.onNextBackOff(container, exception, interval)` ne reçoit **pas le record**. Pour une pause par partition, faire porter la `TopicPartition` par l'exception — c'est le seul véhicule disponible.
+- **Un `RecordInterceptor` qui marque avant traitement et un chemin de sortie sans exception se combinent en une perte silencieuse.** `failure()` n'est appelé que sur exception : un listener qui sort normalement sans avoir travaillé laisse la marque en place, et au passage suivant le record est classé doublon et sauté. Et symétriquement, `failure()` ne doit défaire **que** ce que `intercept()` a posé : sinon un record passé sans déduplication mais portant un `eventId` déjà traité efface la marque d'un travail déjà fait.
+- **`ExponentialBackOffWithMaxRetries` n'est plus dans spring-core 7.1.0** (il reste dans `org.springframework.kafka.support`). `org.springframework.util.backoff.ExponentialBackOff` y a gagné `setMaxAttempts(long)` **et** `setJitter(long)` : c'est celui-là qu'il faut, le jitter évitant que N instances du même groupe réessaient à la même milliseconde.
+- **`-Dtest=X` avec `-am` fait échouer les modules amont** sur « No tests matching pattern ». Ajouter `-Dsurefire.failIfNoSpecifiedTests=false`. Et `-pl <module>` sans `-am` échoue tout court tant que les modules frères ne sont pas installés (cf. §3).
+- **Un caractère U+FEFF *à l'intérieur* d'un script PowerShell casse l'analyseur**, avec un message qui pointe la dernière accolade du fichier (`Jeton inattendu « } »`) et non la vraie ligne. Arrive en écrivant un commentaire *au sujet* du BOM si l'outil d'écriture interprète `﻿`. Les scripts du dépôt sont écrits en **UTF-8 avec BOM** (PS 5.1 lit sinon dans la page ANSI).
+- **`ConsumerGroupMetadata` est dépréciée pour suppression en kafka-clients 4.4**, ses deux constructeurs compris. Dans un test, la simuler plutôt que d'en appeler un.
 - **Spring Boot 4** : starters repackagés, `@ConfigurationProperties` plus stricts, suppression des API dépréciées de Boot 3. Aucun tutoriel Boot 2/3 appliqué tel quel.
 - **Spring Cloud Stream 5.1.0** : modèle fonctionnel (`java.util.function.Function/Consumer/Supplier`) uniquement. `@StreamListener` / `@EnableBinding` n'existent plus.
 - **Kafka 4.x** : protocole consumer group **KIP-848** par défaut côté broker. Pas de ZooKeeper.

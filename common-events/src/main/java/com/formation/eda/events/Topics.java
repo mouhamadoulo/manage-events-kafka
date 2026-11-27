@@ -20,6 +20,17 @@ public final class Topics {
     public static final String INVENTORY_EVENTS = "shop.inventory.events.v1";
     public static final String SHIPPING_EVENTS = "shop.shipping.events.v1";
 
+    /**
+     * Topics derives de {@link #ORDER_EVENTS}, en constantes de compilation.
+     *
+     * <p>WHY des constantes et non {@link #retry(String, int)} : l'attribut {@code topics}
+     * d'un {@code @KafkaListener} doit etre une expression constante. Un appel de methode n'en
+     * est pas une.
+     */
+    public static final String ORDER_EVENTS_RETRY_1 = ORDER_EVENTS + ".retry-1";
+    public static final String ORDER_EVENTS_RETRY_2 = ORDER_EVENTS + ".retry-2";
+    public static final String ORDER_EVENTS_DLT = ORDER_EVENTS + ".dlt";
+
     /** Topic de rejeu etage (phase 4). {@code n} commence a 1. */
     public static String retry(String topic, int n) {
         return topic + ".retry-" + n;

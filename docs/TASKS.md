@@ -2,7 +2,7 @@
 
 **Source de vérité de l'avancement du projet.** Toute tâche terminée est cochée ici, datée, avec sa commande de vérification exécutée.
 
-Dernière mise à jour : **2026-11-22**
+Dernière mise à jour : **2026-11-23**
 
 ## Légende
 
@@ -25,7 +25,7 @@ Convention d'ID : `P<phase>-T<tâche>`. Les tâches se réfèrent par leur ID da
 | 1 | Producer / Consumer fondamentaux | 8 | 8 | **terminée** |
 | 2 | Contrats & JSON Schema | 7 | 7 | **terminée** |
 | 3 | Fiabilité producer | 6 | 6 | **terminée** |
-| 4 | Fiabilité consumer : retry, DLQ, idempotence | 8 | 0 | à faire |
+| 4 | Fiabilité consumer : retry, DLQ, idempotence | 8 | 8 | **terminée** |
 | 5 | Outbox transactionnel | 6 | 0 | à faire |
 | 6 | Saga chorégraphiée & compensation | 9 | 0 | à faire |
 | 7 | Transactions Kafka & exactly-once | 6 | 0 | à faire |
@@ -35,7 +35,7 @@ Convention d'ID : `P<phase>-T<tâche>`. Les tâches se réfèrent par leur ID da
 | 11 | Observabilité & exploitation | 8 | 0 | à faire |
 | 12 | Prod-readiness & sécurité | 8 | 0 | à faire |
 | 13 | Synthèse & restitution | 5 | 0 | à faire |
-| | **Total** | **105** | **30** | |
+| | **Total** | **105** | **38** | |
 
 ---
 
@@ -224,15 +224,79 @@ Objectif : savoir exactement ce qu'un `send()` garantit, et ce qu'il ne garantit
 
 Objectif : un consumer qui survit à un message empoisonné et à un rejeu.
 
-- [ ] **P4-T1** Table `processed_event` + intercepteur d'idempotence réutilisable dans `common-kafka`.
-- [ ] **P4-T2** Test : rejouer deux fois le même `eventId` → un seul effet métier.
-- [ ] **P4-T3** `DefaultErrorHandler` + `ExponentialBackOff`, distinction erreurs **retryables** / **non-retryables**.
-- [ ] **P4-T4** Topics de retry étagés (`retry-1`, `retry-2`) avec délais croissants, puis DLT.
-- [ ] **P4-T5** `DeadLetterPublishingRecoverer` : headers de cause, stacktrace, topic/partition/offset d'origine.
-      *Vérif* : message présent dans `.dlt` avec ses headers.
-- [ ] **P4-T6** **Expérience poison message** : publier un payload invalide, vérifier qu'il ne bloque pas la partition.
-- [ ] **P4-T7** Endpoint d'administration de rejeu depuis la DLT (sélectif, idempotent).
-- [ ] **P4-T8** `docs/patterns/04-retry-dlq-idempotence.md`.
+- [x] **P4-T1** Table `processed_event` + intercepteur d'idempotence réutilisable dans `common-kafka`.
+      *Vérif* : `./mvnw -pl common-kafka -am test` → **64 tests verts**.
+      `JdbcProcessedEventStoreIT` sous `-Pintegration` → **7 tests** contre un vrai Postgres
+      18.7 (Testcontainers 2.0.5) : premier `insert` 1 ligne affectée, second 0.
+      Commits `2d92e16`, `a055544`.
+      Clé primaire **composite** `(event_id, consumer_group)`, écart avec CLAUDE.md §4 validé
+      par l'utilisateur et §4 corrigé : les 5 services de la saga liront les mêmes topics dans
+      5 groupes. `source_topic` hors de la clé, sinon chaque étage de retry rejouerait l'effet.
+      Correctif de sécurité `a055544` : `failure()` ne défait que la marque posée par
+      `intercept()`. Sans cela, une copie illisible d'un événement effaçait la marque d'un
+      travail déjà fait, et la livraison suivante rejouait l'effet métier.
+- [x] **P4-T2** Test : rejouer deux fois le même `eventId` → un seul effet métier.
+      *Vérif* : `IdempotentRecordInterceptorTest` (10 tests, écrits avant l'implémentation) et
+      `RetryChainTest.twoDeliveriesOfTheSameEventIdProduceASingleEffect` de bout en bout sur
+      broker embarqué — les **deux** records sont dans le topic, le compteur métier reste à 1.
+      C'est le consumer qui déduplique, pas le producteur : l'idempotence producteur de la
+      phase 3 ne couvre pas ce cas.
+- [x] **P4-T3** `DefaultErrorHandler` + `ExponentialBackOff`, distinction erreurs **retryables** / **non-retryables**.
+      *Vérif* : `ErrorClassificationTest` → **8 tests**. Non-retryable → recoverer au 1er échec ;
+      transitoire → 3 tentatives puis recoverer. Commit `319aa68`.
+      `javap -c` sur `ExceptionClassifier` montre que spring-kafka classe déjà 6 exceptions
+      non-retryables par défaut : on les redéclare pour que le classement se **lise**.
+      `ExponentialBackOff` de spring-core 7.1.0 et non `ExponentialBackOffWithMaxRetries` —
+      seul le premier a `setJitter`.
+- [x] **P4-T4** Topics de retry étagés (`retry-1`, `retry-2`) avec délais croissants, puis DLT.
+      *Vérif* : `RetryTopologyTest` 9 tests, `RetryStageSupportTest` 11 tests. Horodatages
+      réels relevés dans `RetryChainTest` (délais ramenés à 400 ms / 900 ms) :
+      échec à `20:15:46.177` → retraité depuis `.retry-1` à `46.752`, depuis `.retry-2` à
+      `47.305`. Commits `67daae8`, `a1bbcf5`.
+      Le différé **lève** `NotYetDueException` au lieu de sortir normalement : la première
+      version faisait `pause` + `seek` + retour normal et **perdait tous les messages en
+      attente**, sans une ligne de log (`failure()` n'étant appelé que sur exception, la marque
+      d'idempotence restait en place).
+      Trouvaille : `ContainerPausingBackOffHandler` met en pause **tout le conteneur**, pas la
+      partition — d'où un handler maison et une `TopicPartition` portée par l'exception.
+      Correctif de sécurité `a1bbcf5` : `x-origin-timestamp` vient du producteur, donc
+      l'attente est bornée par le délai de l'étage (une valeur très future suspendait la
+      partition pour des années, une valeur négative débordait).
+- [x] **P4-T5** `DeadLetterPublishingRecoverer` : headers de cause, stacktrace, topic/partition/offset d'origine.
+      *Vérif* : `DiagnosticHeadersTest` 5 tests, `DeadLetterRoutingTest` 7 tests. En réel,
+      `GET /admin/dlt` renvoie `originTopic`, `retryStage`, `exceptionType`, `failedAt`.
+      Commit `a38a8c2`.
+      `x-origin-topic` et `x-origin-timestamp` sont posés **une seule fois** : les
+      `kafka_dlt-original-*` du framework sont réécrits à chaque étage et désignent `.retry-1`
+      au bout de deux étages.
+- [x] **P4-T6** **Expérience poison message** : publier un payload invalide, vérifier qu'il ne bloque pas la partition.
+      *Vérif* : `infra/experiments/p4-t6-poison.ps1`, les deux runs. Commit `956f5a4`.
+      **Protégé** : 20 valides publiés, **20 traités**, 1 message en `.dlt`, 0 en `.retry-1`,
+      lag 0. **Témoin** (sans `ErrorHandlingDeserializer`) : 20 publiés, **10 traités**, 0 en
+      `.dlt`, **lag 11, offset figé à 6641** — celui du message empoisonné.
+      `.retry-1` à 0 côté protégé : un échec de désérialisation est non-retryable.
+      Cette expérience a seule révélé que `org.flywaydb:flyway-core` **n'applique aucune
+      migration** sans `spring-boot-starter-flyway` (auto-configurations découpées en modules
+      en Boot 4) — en silence, et chaque événement partait en DLT sur
+      `BadSqlGrammarException`.
+- [x] **P4-T7** Endpoint d'administration de rejeu depuis la DLT (sélectif, idempotent).
+      *Vérif* : `DltReplayTest` 9 tests, puis en réel sur l'infra Docker —
+      `{"republished":1}` aux **deux** appels, compteur métier 0 → 1 → **1**.
+      Commits `058b4e2`, `7fe711f`.
+      La propriété vraie n'est pas « un rejeu est sauté » (faux : la marque a été effacée par
+      l'échec) mais **« deux rejeux, un seul effet »**. C'est le consumer qui déduplique.
+      Trois garde-fous testés : destination lue dans le **message** (`x-origin-topic`, sinon le
+      rejeu republierait sur `.dlt` et bouclerait), bornes du log lues avant de chercher, borne
+      dure à 100 offsets. Lecture par `assign` + `seek` **sans `group.id`**, vérifiée par
+      `Admin.listGroups()`.
+      Deux correctifs : `offsets:[null]` rendait 500 au lieu de 400, et les services sont
+      désormais liés au **loopback** — le javadoc affirmait `127.0.0.1` alors que Spring Boot
+      écoute sur `0.0.0.0` (CLAUDE.md §1 ne couvrait que les ports Docker).
+- [x] **P4-T8** `docs/patterns/04-retry-dlq-idempotence.md`.
+      *Vérif* : fiche écrite avec les mesures réelles des trois expériences, les huit façons de
+      casser le mécanisme et ce qu'on voit alors, et la comparaison avec `@RetryableTopic`
+      (dont le décalage de nommage est mesuré par `javap`). CLAUDE.md §1, §3, §4 corrigés et
+      10 pièges ajoutés en §5.
 
 ---
 
@@ -393,3 +457,7 @@ Objectif : ce qui séparerait ce labo d'un vrai déploiement.
 | 2026-11-22 | 3 | P3-T1, P3-T2, P3-T5 | Producteur configuré valeur par valeur, résultat du `send()` regardé (503 au lieu d'un échec muet), et outil de rafale du profil `lab`. Le tuning réseau s'est révélé non mesurable sur ce labo : seule la validation du schéma déplace le débit. |
 | 2026-11-22 | 3 | P3-T3, P3-T4, P3-T6 | Les deux pannes mesurées : `acks=0` perd 1 250 records sans un mot, et sans idempotence le réessai écrit +135,8 % de records. Fiche `03-garanties-producer.md`. **Phase 3 terminée (6/6).** |
 | 2026-11-22 | 2 | P2-T5, P2-T7 | Expérience de compatibilité : champ optionnel accepté, champ requis refusé, retrait refusé à cause du modèle de contenu fermé. Trois incidents réels documentés dans la fiche 02. **Phase 2 terminée (7/7).** |
+| 2026-11-23 | 4 | P4-T1 à P4-T5 | Mécanique de fiabilité consumer dans `common-kafka`, importée explicitement par les services : idempotence par `processed_event` (clé composite), classement retryable / non-retryable, étages de retry dont le différé **lève** une exception, DLT à deux templates. Deux correctifs de sécurité sur des pertes silencieuses : `failure()` qui effaçait la marque d'un autre traitement, et une attente non bornée calculée depuis un header non fiable. |
+| 2026-11-23 | 4 | P4-T6, P4-T7 | Les deux pannes mesurées : sans `ErrorHandlingDeserializer`, 10 messages sur 20 traités et l'offset figé ; avec, 20 sur 20 et 1 message en DLT. Rejeu sélectif depuis la DLT, vérifié en réel : deux rejeux, un seul effet métier. Trois bugs que seuls les tests de bout en bout et l'expérience ont révélés — un `KafkaTemplate` déclaré qui supprime celui de Boot, `flyway-core` qui n'applique aucune migration, et les services liés à `0.0.0.0`. |
+| 2026-11-23 | 4 | P4-T8 | Fiche `04-retry-dlq-idempotence.md`, CLAUDE.md §1/§3/§4 corrigés, 10 pièges ajoutés en §5. `./mvnw clean verify` → 9 modules, **109 tests**. **Phase 4 terminée (8/8).** |
+| 2026-11-24 | 4 | revue de branche | Relecture à contexte frais des 12 commits : aucun Critical, 5 Important, 10 Minor. Les cinq Important étaient du même genre — un garde-fou qui vérifiait la forme et pas le fond, tous sur le chemin d'administration : lecture non bornée dans le rejeu (la borne de 100 offsets ne protégeait rien), `x-origin-topic` cru sans être validé (republication dans la DLT elle-même possible), partition inexistante qui bloquait 60 s, vue sans partition, et trois délais configurés qui routaient vers un `.retry-3` inexistant — une partition bloquée. Corrigés en une passe, 9 tests écrits d'abord. Plus une fuite trouvée en route : le `ProducerFactory` du template `byte[]` n'était jamais fermé. `./mvnw clean verify` → **118 tests**. |

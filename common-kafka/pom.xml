@@ -28,5 +28,32 @@
             <groupId>io.confluent</groupId>
             <artifactId>kafka-json-schema-serializer</artifactId>
         </dependency>
+
+        <!--
+          Les DEUX dependances suivantes sont <optional>true</optional>, et ce n'est pas un
+          detail de style.
+
+          WHY: les 6 services dependent de common-kafka, et 5 n'ont aucune base. En portee
+          compile, spring-boot-starter-jdbc poserait Hikari et DataSourceAutoConfiguration sur
+          leur classpath, et flyway-core y ajouterait FlywayAutoConfiguration, qui reclame une
+          DataSource. Sans spring.datasource.url ni pilote, leur contexte echoue au demarrage
+          sur « Failed to determine a suitable driver class » : les 5 tests de contexte
+          passent au rouge, et ./mvnw clean verify ne passe plus.
+
+          optional = la dependance est utilisable pour compiler ICI, mais n'est pas
+          transitive. Chaque service qui a une base les redeclare explicitement (voir
+          notification-service/pom.xml). La migration de db/migration/shared reste, elle, une
+          ressource du jar : elle voyage sans la dependance.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-jdbc</artifactId>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-flyway</artifactId>
+            <optional>true</optional>
+        </dependency>
     </dependencies>
 </project>

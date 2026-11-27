@@ -74,7 +74,15 @@ spring:
       auto-offset-reset: earliest
 
 server:
-  port: 8091
+  # Lie au LOOPBACK, pas a toutes les interfaces.
+  #
+  # WHY: Spring Boot ecoute par defaut sur 0.0.0.0. CLAUDE.md §1 impose que tout port du labo
+  # soit lie a 127.0.0.1 — la regle etait tenue pour les ports publies par Docker, pas pour les
+  # services lances sur l'hote. Or le profil lab expose /lab/producer/*, qui ecrit en masse
+  # dans un topic metier et peut y injecter des pannes, et POST /orders n'est pas authentifie
+  # (P12-T8). Sur 0.0.0.0, c'est un moyen d'injection ouvert au reseau local.
+  address: ${SERVER_ADDRESS:127.0.0.1}
+  port: ${SERVER_PORT:8091}
 
 management:
   endpoints:

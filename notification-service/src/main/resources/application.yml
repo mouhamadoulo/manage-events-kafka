@@ -1,45 +1,122 @@
 spring:
   application:
     name: notification-service
+
+  # Base notification-service : la table processed_event (P4-T1). Une base par service
+  # (infra/postgres/init-databases.sh) : aucune jointure possible entre services, le couplage
+  # ne peut passer que par les evenements Kafka.
+  datasource:
+    url: ${POSTGRES_URL:jdbc:postgresql://localhost:5432/notifications}
+    username: ${POSTGRES_USER:eda}
+    password: ${POSTGRES_PASSWORD:eda}
+
+  flyway:
+    # Vient du jar de common-kafka : la table processed_event est identique pour tous les
+    # services, et les 5 services de la saga (phase 6) l'heriteront sans la recopier.
+    #
+    # PIEGE, trouve par JdbcProcessedEventStoreIT. La valeur ecrite d'abord etait
+    # « classpath:db/migration/shared,classpath:db/migration ». Flyway a repondu :
+    #   WARN  Discarding location 'classpath:db/migration/shared' as it is a sub-location
+    #         of 'classpath:db/migration'
+    # Les deux emplacements se confondaient donc en un seul, scanne recursivement, et le
+    # script s'appelait « shared/V1__processed_event.sql ». Ca marchait par accident — mais
+    # une migration locale au service nommee V1__ serait entree en collision de VERSION avec
+    # la V1 partagee, et Flyway aurait refuse de demarrer.
+    #
+    # Quand ce service aura ses propres migrations, elles iront dans un emplacement FRERE
+    # (db/migration/notification, jamais imbrique) et leurs versions commenceront a 100 : les
+    # versions 1 a 99 sont reservees aux migrations partagees.
+    locations: classpath:db/migration/shared
+
   kafka:
     # Listener EXTERNAL du broker : annonce localhost:9092 (cf. infra/docker-compose.yml).
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
     properties:
       schema.registry.url: ${SCHEMA_REGISTRY_URL:http://localhost:8081}
+
+    # Ce service ne publie aucun evenement metier. Ce producteur sert UNIQUEMENT a la
+    # mecanique de fiabilite : republier un message en echec vers .retry-1, .retry-2 ou .dlt.
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      # Les sujets des topics derives sont deja enregistres (P2-T3), et
+      # auto.register.schemas reste a false : publier en DLT n'a pas a creer de contrat.
+      value-serializer: com.formation.eda.kafka.json.EventJsonSchemaSerializer
+      # Defaut 1 depuis Kafka 3 ; explicite ici parce qu'un message qu'on met en DLT est le
+      # dernier endroit ou l'on accepte de le perdre.
+      acks: all
+      properties:
+        auto.register.schemas: false
+        json.fail.invalid.schema: true
+
     consumer:
-      # Le groupe est l'unite de partage du travail : les partitions d'un topic sont
-      # reparties entre les membres d'un MEME groupe. Surchargeable par variable d'env pour
-      # l'experience P1-T5 (deux groupes -> chacun recoit tout).
+      # Le groupe est l'unite de partage du travail : les partitions d'un topic sont reparties
+      # entre les membres d'un MEME groupe. Surchargeable par variable d'env pour l'experience
+      # P1-T5 (deux groupes -> chacun recoit tout).
       group-id: ${CONSUMER_GROUP:notification-service}
       # earliest en dev : un nouveau consumer group rejoue tout l'historique du topic.
       # Defaut Kafka = latest, qui masquerait les messages deja publies.
-      # N'agit QUE si le groupe n'a pas d'offset commite : un groupe connu reprend ou il
-      # en etait, quelle que soit cette valeur.
+      # N'agit QUE si le groupe n'a pas d'offset commite.
       auto-offset-reset: earliest
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
-      # Phase 2 : le message commence par un octet 0 puis l'id du schema sur 4 octets. Ce
-      # deserialiseur lit cet id, va chercher le schema dans le registre, et construit le
-      # type demande ci-dessous. Un JacksonJsonDeserializer nu echouerait sur ces 5 octets.
+
+      # PHASE 4 — la faille de la phase 1 est fermee ici.
       #
-      # ATTENTION, faille volontaire de la phase 1 toujours en place : ce deserialiseur est
-      # nu. Un message mal forme echoue AVANT le listener, l'offset n'est jamais commite,
-      # la partition est bloquee. La phase 4 ajoute ErrorHandlingDeserializer puis
-      # DefaultErrorHandler + DeadLetterPublishingRecoverer.
-      value-deserializer: io.confluent.kafka.serializers.json.KafkaJsonSchemaDeserializer
+      # Avant : le deserialiseur Confluent etait branche directement. Un message mal forme
+      # echouait AVANT le listener, l'offset n'etait jamais commite, et la partition etait
+      # bloquee pour toujours (mesure en P4-T6 : lag qui ne redescend pas).
+      #
+      # ErrorHandlingDeserializer delegue, attrape l'echec, et produit un record a VALEUR
+      # NULLE portant l'exception en header. Le record atteint donc le conteneur, le
+      # gestionnaire d'erreur le classe non-retryable, et il part en .dlt avec ses octets
+      # d'origine. La partition avance.
+      #
+      # Surchargeable par variable d'env : l'experience P4-T6 a besoin du temoin sans
+      # garde-fou pour montrer le blocage.
+      value-deserializer: ${VALUE_DESERIALIZER:org.springframework.kafka.support.serializer.ErrorHandlingDeserializer}
       properties:
-        # Le type a construire. Le wire format dit QUEL schema a servi, pas quelle classe
-        # Java instancier : les deux informations sont distinctes, et c'est voulu — un
-        # consumer Python lit le meme message sans connaitre ce nom.
+        # Le deserialiseur reel, derriere ErrorHandlingDeserializer.
+        spring.deserializer.value.delegate.class: io.confluent.kafka.serializers.json.KafkaJsonSchemaDeserializer
+        # Le type a construire. Le wire format dit QUEL schema a servi, pas quelle classe Java
+        # instancier : les deux informations sont distinctes, et c'est voulu — un consumer
+        # Python lit le meme message sans connaitre ce nom.
         json.value.type: com.formation.eda.events.order.OrderPlaced
         # Valide aussi a la lecture : un message hors contrat est refuse au lieu d'etre
         # silencieusement tronque. Defaut false.
         json.fail.invalid.schema: true
-        # Defaut true : un champ inconnu fait echouer la deserialisation. A false, un
-        # consumer qui n'a pas encore le nouveau schema ignorerait les champs ajoutes —
-        # c'est ce qui rend l'evolution BACKWARD supportable (cf. P2-T5).
+        # Defaut true : un champ inconnu fait echouer la deserialisation. A false, un consumer
+        # qui n'a pas encore le nouveau schema ignore les champs ajoutes — c'est ce qui rend
+        # l'evolution BACKWARD supportable (cf. P2-T5).
         json.fail.unknown.properties: false
 
+# Mecanique de fiabilite consumer (ConsumerReliabilityProperties).
+eda:
+  reliability:
+    # Un delai par etage, dans l'ordre : .retry-1 puis .retry-2. Le delai se compte depuis la
+    # publication d'origine (header x-origin-timestamp), pas depuis l'arrivee dans l'etage —
+    # sinon il repartirait de zero a chaque redemarrage du consumer.
+    # Deux etages, donc un message en echec permanent atteint la DLT en ~35 s.
+    stage-delays: ${RETRY_STAGE_DELAYS:5s,30s}
+    # Reessais BLOQUANTS sur le topic principal, avant de passer au premier etage. Petit
+    # volontairement : ce retry occupe le thread du consumer et retarde les evenements
+    # suivants de la partition. Il est la pour l'incident d'une demi-seconde.
+    blocking-retries: 2
+    blocking-initial-interval: 200ms
+    blocking-multiplier: 2.0
+    # Sans jitter, N instances du meme groupe reessaient a la meme milliseconde et frappent
+    # ensemble la dependance qui vient de tomber.
+    blocking-jitter: 50ms
+
 server:
+  # Lie au LOOPBACK, pas a toutes les interfaces.
+  #
+  # WHY: Spring Boot ecoute par defaut sur 0.0.0.0. CLAUDE.md §1 impose que tout port du labo
+  # soit lie a 127.0.0.1 — la regle etait tenue pour les ports publies par Docker, pas pour les
+  # services lances sur l'hote. Or ce service expose /admin/dlt/replay, qui republie des
+  # messages dans un topic METIER et n'est pas authentifie : sur 0.0.0.0, n'importe quelle
+  # machine du reseau local peut injecter dans la saga.
+  # L'authentification elle-meme est P12-T8 ; le bind loopback est ce qui rend l'absence
+  # d'authentification acceptable en attendant.
+  address: ${SERVER_ADDRESS:127.0.0.1}
   port: ${SERVER_PORT:8095}
 
 management:
