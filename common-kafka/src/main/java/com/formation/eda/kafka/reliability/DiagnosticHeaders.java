@@ -37,13 +37,22 @@ public class DiagnosticHeaders implements BiFunction<ConsumerRecord<?, ?>, Excep
     public Headers apply(ConsumerRecord<?, ?> record, Exception exception) {
         Headers added = new RecordHeaders();
 
-        // Poses une seule fois. Le recoverer recopie les headers du record d'origine sur le
-        // message republie : s'ils sont deja la, les reposer creerait une seconde valeur sous
-        // le meme nom, et le lecteur devrait deviner laquelle est la bonne.
-        if (record.headers().lastHeader(EventHeaders.ORIGIN_TOPIC) == null) {
+        // Poses une seule fois — mais « une seule fois » ne vaut QUE pour un record venant
+        // d'un etage de retry, ou le header a ete pose par NOUS au passage precedent. Le
+        // recoverer recopie les headers du record d'origine sur le message republie : les
+        // reposer creerait une seconde valeur sous le meme nom, et le lecteur devrait deviner
+        // laquelle est la bonne.
+        //
+        // WHY ce test sur l'etage : sur le topic METIER, il n'y a pas de passage precedent. Une
+        // valeur deja presente y vient donc du PRODUCTEUR, c'est-a-dire de l'exterieur. La
+        // croire laisserait un appelant choisir le topic de destination d'un futur rejeu
+        // depuis la DLT — y compris la DLT elle-meme.
+        boolean fromRetryStage = RetryTopology.stageOf(record.topic()) > 0;
+
+        if (!fromRetryStage || record.headers().lastHeader(EventHeaders.ORIGIN_TOPIC) == null) {
             put(added, EventHeaders.ORIGIN_TOPIC, record.topic());
         }
-        if (record.headers().lastHeader(EventHeaders.ORIGIN_TIMESTAMP) == null) {
+        if (!fromRetryStage || record.headers().lastHeader(EventHeaders.ORIGIN_TIMESTAMP) == null) {
             // Le timestamp du record au PREMIER echec, donc l'instant de publication sur le
             // topic metier. C'est de la que se comptent les echeances des etages.
             put(added, EventHeaders.ORIGIN_TIMESTAMP, String.valueOf(record.timestamp()));

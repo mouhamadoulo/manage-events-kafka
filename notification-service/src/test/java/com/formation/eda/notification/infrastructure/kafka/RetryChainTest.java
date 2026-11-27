@@ -90,6 +90,7 @@ class RetryChainTest {
     @Autowired
     private EventCounters counters;
 
+    private DefaultKafkaProducerFactory<String, Object> producerFactory;
     private KafkaTemplate<String, Object> producer;
     private Map<String, Long> baseline;
 
@@ -108,6 +109,20 @@ class RetryChainTest {
     @AfterAll
     static void dropRegistry() {
         MockSchemaRegistry.dropScope(SCOPE);
+    }
+
+    @org.junit.jupiter.api.AfterEach
+    void closeProducer() {
+        // WHY fermer explicitement : un DefaultKafkaProducerFactory cree a chaque test et
+        // jamais detruit laisse ses threads producer-N en boucle de reconnexion sur le broker
+        // embarque eteint. Surefire doit alors tuer son fork :
+        //   [ERROR] Surefire is going to kill self fork JVM. The exit has elapsed 30 seconds
+        //   after System.exit(0)
+        // Le build reussissait quand meme, en perdant 30 s et en affichant une erreur.
+        if (producerFactory != null) {
+            producerFactory.destroy();
+            producerFactory = null;
+        }
     }
 
     @BeforeEach
@@ -222,7 +237,8 @@ class RetryChainTest {
         configs.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
         configs.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, EventJsonSchemaSerializer.class);
         configs.put("schema.registry.url", "mock://" + SCOPE);
-        return new KafkaTemplate<>(new DefaultKafkaProducerFactory<>(configs));
+        producerFactory = new DefaultKafkaProducerFactory<>(configs);
+        return new KafkaTemplate<>(producerFactory);
     }
 
     private static OrderPlaced orderPlaced() {

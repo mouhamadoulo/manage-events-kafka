@@ -17,7 +17,6 @@ import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.core.ProducerFactory;
 import org.springframework.kafka.listener.DeadLetterPublishingRecoverer;
 import org.springframework.kafka.listener.ConsumerRecordRecoverer;
-import org.springframework.kafka.listener.ContainerPausingBackOffHandler;
 import org.springframework.kafka.listener.DefaultErrorHandler;
 import org.springframework.kafka.listener.ListenerContainerPauseService;
 import org.springframework.kafka.listener.ListenerContainerRegistry;
@@ -211,17 +210,6 @@ public class ConsumerReliabilityConfiguration {
     }
 
     /**
-     * Template de publication des payloads <b>bruts</b>.
-     *
-     * <p>WHY un second template : un echec de deserialisation n'a pas d'objet a republier,
-     * seulement les octets d'origine, que le recoverer recupere dans la
-     * {@code DeserializationException}. Les passer au serialiseur JSON Schema echouerait une
-     * seconde fois — et cette fois a l'interieur du mecanisme qui devait sauver le message.
-     *
-     * <p>La configuration est copiee de celle du producteur du service (meme broker, memes
-     * reglages de fiabilite), en remplacant les seuls serialiseurs.
-     */
-    /**
      * Template de publication des payloads <b>typés</b>, avec le serialiseur du service.
      *
      * <p>WHY declarer ce template alors que Boot en fournit un : le bean {@code kafkaTemplate}
@@ -242,6 +230,17 @@ public class ConsumerReliabilityConfiguration {
         return (ProducerFactory<String, Object>) producerFactory;
     }
 
+    /**
+     * Template de publication des payloads <b>bruts</b>.
+     *
+     * <p>WHY un second template : un echec de deserialisation n'a pas d'objet a republier,
+     * seulement les octets d'origine, que le recoverer recupere dans la
+     * {@code DeserializationException}. Les passer au serialiseur JSON Schema echouerait une
+     * seconde fois — et cette fois a l'interieur du mecanisme qui devait sauver le message.
+     *
+     * <p>La configuration est copiee de celle du producteur du service (meme broker, memes
+     * reglages de fiabilite), en remplacant les seuls serialiseurs.
+     */
     @Bean
     KafkaTemplate<String, byte[]> byteArrayDltTemplate(ProducerFactory<?, ?> producerFactory) {
         Map<String, Object> configs = new HashMap<>(producerFactory.getConfigurationProperties());
@@ -249,7 +248,33 @@ public class ConsumerReliabilityConfiguration {
                 StringSerializer.class);
         configs.put(org.apache.kafka.clients.producer.ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG,
                 ByteArraySerializer.class);
-        return new KafkaTemplate<>(new DefaultKafkaProducerFactory<>(configs));
+        this.byteArrayProducerFactory = new DefaultKafkaProducerFactory<>(configs);
+        return new KafkaTemplate<>(this.byteArrayProducerFactory);
+    }
+
+    /**
+     * La fabrique du template {@code byte[]}, gardee pour pouvoir la FERMER.
+     *
+     * <p>WHY elle n'est pas un bean : {@link DefaultKafkaProducerFactory} <b>est</b> un
+     * {@code ProducerFactory}, et le bean de Boot est
+     * {@code @ConditionalOnMissingBean(ProducerFactory.class)}. En declarer un ici supprimerait
+     * donc celui de Boot — exactement le piege deja rencontre avec {@code KafkaTemplate}, et
+     * verifie : le contexte ne demarre plus, {@code byteArrayDltProducerFactory} ne trouvant
+     * plus de {@code ProducerFactory} a copier.
+     *
+     * <p>WHY il faut quand meme la fermer : construite dans une methode, elle echappe au cycle
+     * de vie du conteneur, et ses threads {@code producer-N} survivent a la fermeture du
+     * contexte. Visible en test — le fork surefire ne sortait pas et devait etre tue
+     * ({@code Surefire is going to kill self fork JVM. The exit has elapsed 30 seconds}).
+     */
+    private DefaultKafkaProducerFactory<String, byte[]> byteArrayProducerFactory;
+
+    @jakarta.annotation.PreDestroy
+    void closeByteArrayProducerFactory() {
+        if (byteArrayProducerFactory != null) {
+            byteArrayProducerFactory.destroy();
+            byteArrayProducerFactory = null;
+        }
     }
 
     /**
@@ -309,8 +334,9 @@ public class ConsumerReliabilityConfiguration {
         ThreadPoolTaskScheduler scheduler = new ThreadPoolTaskScheduler();
         scheduler.setPoolSize(1);
         scheduler.setThreadNamePrefix("retry-pause-");
-        // Sans cela, l'arret de l'application n'attend pas les reprises en vol et une partition
-        // peut rester en pause jusqu'au prochain demarrage.
+        // L'etat de pause vit dans le conteneur, en memoire, et meurt avec le contexte : ce
+        // reglage n'achete donc PAS la survie d'une pause au redemarrage. Il achete seulement
+        // que l'arret attende les reprises deja programmees, au lieu de les abandonner.
         scheduler.setWaitForTasksToCompleteOnShutdown(true);
         scheduler.setAwaitTerminationSeconds(5);
         return scheduler;

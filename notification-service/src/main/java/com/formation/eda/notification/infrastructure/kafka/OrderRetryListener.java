@@ -2,6 +2,7 @@ package com.formation.eda.notification.infrastructure.kafka;
 
 import com.formation.eda.events.Topics;
 import com.formation.eda.events.order.OrderPlaced;
+import com.formation.eda.kafka.reliability.ConsumerReliabilityProperties;
 import com.formation.eda.kafka.reliability.RetryStageSupport;
 import com.formation.eda.notification.application.OrderNotificationHandler;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
@@ -32,10 +33,27 @@ public class OrderRetryListener {
 
     private static final Logger log = LoggerFactory.getLogger(OrderRetryListener.class);
 
+    /**
+     * Nombre d'etages reellement ecoutes par cette classe. Doit rester egal au nombre de
+     * methodes {@code @KafkaListener} ci-dessous.
+     *
+     * <p>C'est le pendant de {@code eda.reliability.stage-delays} : les delais sont reglables,
+     * les listeners non. La verification est faite ici, au demarrage, parce que c'est ici que
+     * vit la verite sur le nombre d'etages ecoutes.
+     */
+    static final int LISTENED_STAGES = 2;
+
     private final OrderNotificationHandler handler;
     private final RetryStageSupport retryStageSupport;
 
-    public OrderRetryListener(OrderNotificationHandler handler, RetryStageSupport retryStageSupport) {
+    public OrderRetryListener(OrderNotificationHandler handler,
+                              RetryStageSupport retryStageSupport,
+                              ConsumerReliabilityProperties properties) {
+        // Echoue au DEMARRAGE si la configuration declare un nombre d'etages different de
+        // celui qu'on ecoute. Un etage configure sans listener bloque sa partition (publication
+        // vers un topic inexistant, rejouee en boucle) ; un listener sans delai configure
+        // envoie en DLT sans attendre. Les deux sont silencieux a l'execution.
+        properties.requireStageCount(LISTENED_STAGES);
         this.handler = handler;
         this.retryStageSupport = retryStageSupport;
     }

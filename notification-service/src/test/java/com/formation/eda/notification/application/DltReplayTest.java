@@ -207,6 +207,105 @@ class DltReplayTest {
     }
 
     @Test
+    @DisplayName("rejouer un offset ancien ne lit pas tout le reste du log")
+    void replayingAnOldOffsetDoesNotReadTheWholeTailOfTheLog() {
+        // Le javadoc du controleur annonce « un appel ne peut pas faire tourner la memoire du
+        // service ». La borne de 100 offsets ne garantissait rien : la boucle de lecture
+        // s'arretait a la FIN DU LOG, pas a l'offset cherche. Rejouer l'offset 5 d'une DLT qui
+        // en contient 50 000 chargeait 50 000 records.
+        long premier = putInDeadLetterTopic(orderPlaced(), Topics.ORDER_EVENTS, "panne simulee");
+        for (int i = 0; i < 40; i++) {
+            putInDeadLetterTopic(orderPlaced(), Topics.ORDER_EVENTS, "bruit " + i);
+        }
+
+        long avant = System.currentTimeMillis();
+        DltReplayService.ReplayReport report = replayService.replay(
+                new DltReplayService.ReplayRequest(Topics.ORDER_EVENTS_DLT, 0, List.of(premier)));
+        long duree = System.currentTimeMillis() - avant;
+
+        assertThat(report.republished()).isEqualTo(1);
+        assertThat(report.scanned())
+                .as("records lus pour un seul offset ancien")
+                .isLessThanOrEqualTo(10);
+        assertThat(duree).as("duree de lecture, ms").isLessThan(5_000L);
+    }
+
+    @Test
+    @DisplayName("plusieurs offsets disperses sont lus en une seule passe")
+    void severalScatteredOffsetsAreReadInASingleScan() {
+        List<Long> offsets = new java.util.ArrayList<>();
+        for (int i = 0; i < 12; i++) {
+            long offset = putInDeadLetterTopic(orderPlaced(), Topics.ORDER_EVENTS, "cible " + i);
+            if (i % 4 == 0) {
+                offsets.add(offset);
+            }
+        }
+
+        DltReplayService.ReplayReport report = replayService.replay(
+                new DltReplayService.ReplayRequest(Topics.ORDER_EVENTS_DLT, 0, offsets));
+
+        assertThat(report.republished()).isEqualTo(offsets.size());
+        // Une passe unique : on ne relit pas le log une fois par offset demande.
+        assertThat(report.scanned()).isLessThanOrEqualTo(20);
+    }
+
+    @Test
+    @DisplayName("une partition inconnue est refusee tout de suite, pas apres 60 s")
+    void anUnknownPartitionIsRejectedImmediately() {
+        // endOffsets() sur une partition inexistante attend default.api.timeout.ms (60 s) :
+        // le thread HTTP bloquait une minute puis rendait 500.
+        long avant = System.currentTimeMillis();
+
+        assertThatThrownBy(() -> replayService.replay(
+                new DltReplayService.ReplayRequest(Topics.ORDER_EVENTS_DLT, 977, List.of(0L))))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("977");
+
+        assertThat(System.currentTimeMillis() - avant).isLessThan(10_000L);
+    }
+
+    @Test
+    @DisplayName("un x-origin-topic qui pointe une dlt est refuse")
+    void anOriginTopicPointingAtADeadLetterTopicIsRejected() {
+        // Le garde-fou verifiait la PRESENCE du header, pas sa valeur. Un x-origin-topic valant
+        // la dlt elle-meme faisait republier dedans : un message de plus a chaque appel, la
+        // meme boucle infinie que le header absent.
+        long offset = putInDeadLetterTopic(orderPlaced(), Topics.ORDER_EVENTS_DLT, "panne simulee");
+
+        DltReplayService.ReplayReport report = replayService.replay(
+                new DltReplayService.ReplayRequest(Topics.ORDER_EVENTS_DLT, 0, List.of(offset)));
+
+        assertThat(report.rejected()).containsExactly(offset);
+        assertThat(report.republished()).isZero();
+    }
+
+    @Test
+    @DisplayName("un x-origin-topic qui pointe un etage de retry est refuse")
+    void anOriginTopicPointingAtARetryStageIsRejected() {
+        long offset = putInDeadLetterTopic(orderPlaced(), Topics.ORDER_EVENTS_RETRY_1, "panne simulee");
+
+        DltReplayService.ReplayReport report = replayService.replay(
+                new DltReplayService.ReplayRequest(Topics.ORDER_EVENTS_DLT, 0, List.of(offset)));
+
+        assertThat(report.rejected()).containsExactly(offset);
+    }
+
+    @Test
+    @DisplayName("la vue d'un message en dlt porte sa partition")
+    void theViewCarriesItsPartition() {
+        // Sans elle, un operateur lit « offset=23 » et doit deviner la partition pour le
+        // rejeu. Sur une dlt a plusieurs partitions, l'offset 23 existe dans chacune : le
+        // rejeu republierait un AUTRE message que celui qu'on a regarde.
+        long offset = putInDeadLetterTopic(orderPlaced(), Topics.ORDER_EVENTS, "panne simulee");
+
+        assertThat(replayService.peek(Topics.ORDER_EVENTS_DLT, 20))
+                .anySatisfy(record -> {
+                    assertThat(record.offset()).isEqualTo(offset);
+                    assertThat(record.partition()).isZero();
+                });
+    }
+
+    @Test
     @DisplayName("plus de 100 offsets est refuse")
     void moreThanOneHundredOffsetsIsRejected() {
         List<Long> tooMany = LongStream.range(0, 101).boxed().toList();

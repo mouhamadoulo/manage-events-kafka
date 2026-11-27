@@ -70,6 +70,24 @@ class DiagnosticHeadersTest {
     }
 
     @Test
+    @DisplayName("un x-origin-topic pose par le producteur est ecrase sur le topic metier")
+    void aProducerSuppliedOriginTopicIsOverwrittenOnTheMainTopic() {
+        // Le « une seule fois » ne vaut QUE pour un record venant d'un etage de retry, ou le
+        // header a ete pose par nous au passage precedent. Sur le topic metier, il n'y a pas
+        // de passage precedent : une valeur presente vient du PRODUCTEUR, donc de l'exterieur,
+        // et la croire laisse un appelant choisir la destination d'un futur rejeu.
+        Headers forge = new RecordHeaders();
+        forge.add(EventHeaders.ORIGIN_TOPIC, "shop.order.events.v1.dlt".getBytes(StandardCharsets.UTF_8));
+        forge.add(EventHeaders.ORIGIN_TIMESTAMP, "1".getBytes(StandardCharsets.UTF_8));
+
+        Headers added = diagnosticHeaders.apply(record(MAIN, forge), boom());
+
+        assertThat(value(added, EventHeaders.ORIGIN_TOPIC)).isEqualTo(MAIN);
+        assertThat(value(added, EventHeaders.ORIGIN_TIMESTAMP))
+                .isEqualTo(String.valueOf(PUBLISHED_AT.toEpochMilli()));
+    }
+
+    @Test
     @DisplayName("x-retry-stage porte l'etage d'ou vient le record")
     void retryStageCarriesTheStageTheRecordCameFrom() {
         assertThat(value(diagnosticHeaders.apply(record(MAIN, new RecordHeaders()), boom()),

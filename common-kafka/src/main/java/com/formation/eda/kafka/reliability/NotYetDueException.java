@@ -19,9 +19,9 @@ import org.apache.kafka.common.TopicPartition;
  * <ul>
  *   <li>{@code RecordInterceptor.failure()} part, donc la marque d'idempotence est retiree ;
  *   <li>l'offset n'est <b>pas</b> commite, donc le record sera bien redelivre ;
- *   <li>le gestionnaire d'erreur du conteneur prend la main, et c'est lui qui sait mettre la
- *       partition en pause pour une duree donnee
- *       ({@code ContainerPausingBackOffHandler}) sans bloquer de thread.
+ *   <li>le gestionnaire d'erreur du conteneur prend la main, et c'est lui qui sait appliquer
+ *       un delai sans bloquer de thread — ici {@link PartitionPausingBackOffHandler}, et non
+ *       le {@code ContainerPausingBackOffHandler} du framework : voir plus bas.
  * </ul>
  *
  * <p>Elle doit etre classee <b>retryable</b> : non-retryable, elle enverrait en DLT au premier

@@ -198,8 +198,14 @@ Show-GroupState "lag apres"
 $processed = $statsAfter.received - $statsBefore.received
 $inDlt = $dltAfter - $dltBefore
 $inRetry = $retry1After - $retry1Before
-$poisonedLag = (Get-GroupState | Where-Object { $_.Topic -eq $Topic } |
-    Measure-Object -Property Lag -Sum).Sum
+# Le lag vaut "-" quand le groupe n'a pas de proprietaire — ce qui arrive juste apres un
+# redemarrage, donc pendant le temoin. Measure-Object sur ces chaines leve sous
+# $ErrorActionPreference = "Stop" : on convertit explicitement, en ignorant les non-numeriques.
+$poisonedLag = 0
+foreach ($row in (Get-GroupState | Where-Object { $_.Topic -eq $Topic })) {
+    $valeur = 0
+    if ([int]::TryParse($row.Lag, [ref]$valeur)) { $poisonedLag += $valeur }
+}
 
 Write-Host ""
 Write-Host "=== Resultat ===" -ForegroundColor Cyan

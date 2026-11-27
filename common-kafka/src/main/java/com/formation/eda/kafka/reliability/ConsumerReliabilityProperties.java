@@ -63,6 +63,36 @@ public record ConsumerReliabilityProperties(
     }
 
     /**
+     * Verifie que le nombre de delais configures correspond au nombre d'etages reellement
+     * ecoutes, et echoue au DEMARRAGE sinon.
+     *
+     * <p>WHY cette verification existe. {@code stage-delays} est documente comme reglable, et
+     * c'est volontaire — un reglage qu'on ne peut pas changer est un reglage qu'on ne peut pas
+     * mesurer. Mais les topics et les listeners, eux, sont figes. Avec trois delais pour deux
+     * etages ecoutes, un echec dans {@code .retry-2} est route vers {@code .retry-3} : topic
+     * inexistant ({@code auto.create.topics.enable=false}), publication en echec, et comme le
+     * recoverer est configure pour remonter l'erreur, le record est rejoue en boucle sur
+     * {@code .retry-2}. C'est une <b>partition bloquee</b>, c'est-a-dire precisement ce que
+     * cette phase supprime. Symetriquement, un seul delai envoie en DLT tout ce qui atterrit
+     * dans {@code .retry-2}, sans un mot.
+     *
+     * <p>Passer {@code stageCount} en parametre a {@link RetryTopology} accordait la topologie
+     * aux <i>delais</i> ; il manquait de l'accorder aux <i>listeners</i>.
+     *
+     * @param listenedStages nombre d'etages pour lesquels un listener existe reellement
+     * @throws IllegalStateException en cas de desaccord
+     */
+    public void requireStageCount(int listenedStages) {
+        if (stageCount() != listenedStages) {
+            throw new IllegalStateException(
+                    "eda.reliability.stage-delays declare " + stageCount()
+                            + " etage(s) de retry, mais " + listenedStages
+                            + " sont ecoutes. Un etage sans listener bloque sa partition ; "
+                            + "un listener sans delai envoie en DLT sans attendre.");
+        }
+    }
+
+    /**
      * @param stage numero d'etage, a partir de 1 (cf. convention de nommage {@code .retry-1})
      * @throws IllegalArgumentException si aucun delai n'est declare pour cet etage — mieux vaut
      *         echouer au demarrage que mettre un record en attente d'une echeance inventee

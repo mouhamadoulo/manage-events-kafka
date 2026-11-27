@@ -161,6 +161,30 @@ class RetryStageSupportTest {
         assertThatCode(() -> support.requireDue(record)).doesNotThrowAnyException();
     }
 
+    @Test
+    @DisplayName("un desaccord entre delais configures et etages ecoutes echoue vite")
+    void aMismatchBetweenConfiguredDelaysAndListenedStagesFailsFast() {
+        // eda.reliability.stage-delays est documente comme reglable. Avec trois delais, un
+        // echec dans .retry-2 serait route vers .retry-3 : topic inexistant
+        // (auto.create.topics.enable=false), publication en echec, et comme le recoverer
+        // remonte l'erreur, le record tourne en boucle sur .retry-2 — une PARTITION BLOQUEE,
+        // c'est-a-dire exactement ce que la phase 4 supprime.
+        ConsumerReliabilityProperties troisDelais = new ConsumerReliabilityProperties(
+                List.of(Duration.ofSeconds(1), Duration.ofSeconds(2), Duration.ofSeconds(3)),
+                2, Duration.ofMillis(200), 2.0, Duration.ofMillis(50));
+
+        assertThatThrownBy(() -> troisDelais.requireStageCount(2))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("3")
+                .hasMessageContaining("2");
+    }
+
+    @Test
+    @DisplayName("un accord entre delais et etages passe")
+    void amatchBetweenDelaysAndStagesPasses() {
+        assertThatCode(() -> PROPS.requireStageCount(2)).doesNotThrowAnyException();
+    }
+
     private static ConsumerRecord<String, Object> record(String topic, Instant originTimestamp) {
         Headers headers = new RecordHeaders();
         if (originTimestamp != null) {

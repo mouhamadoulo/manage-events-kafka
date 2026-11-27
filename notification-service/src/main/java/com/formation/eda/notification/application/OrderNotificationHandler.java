@@ -48,7 +48,13 @@ public class OrderNotificationHandler {
         // deserialisation passe par ErrorHandlingDeserializer. Sans ce garde-fou c'est une NPE,
         // donc un echec de traitement, donc un trajet complet par les etages de retry pour un
         // message qui n'en contient rien.
-        if (event == null || event.envelope() == null) {
+        //
+        // WHY on ne teste PAS event.envelope() == null : le constructeur compact d'OrderPlaced
+        // fait requireNonNull(envelope), donc un OrderPlaced sans enveloppe n'existe pas. Le
+        // tester donnait une branche morte — et, pire, une branche qui sortait NORMALEMENT
+        // apres que l'intercepteur a pose la marque, c'est-a-dire la forme exacte du bug dont
+        // toute cette phase parle.
+        if (event == null) {
             log.warn("ignore un message sans payload exploitable : cle={} topic={} partition={} offset={}",
                     record.key(), record.topic(), record.partition(), record.offset());
             return;

@@ -238,12 +238,41 @@ templates.put(Object.class, eventDltTemplate);
 
 ---
 
+## Pourquoi par partition, et non par conteneur
+
+Le framework fournit un `ContainerPausingBackOffHandler`. Il ne convient pas, et c'est
+mesurable : il appelle `pauseService.pause(container, durée)`, donc il suspend **toutes** les
+partitions assignées au consumer. Sur un `.retry-1` à 3 partitions, un seul record arrivé trop
+tôt retarde les deux autres partitions de 5 secondes — y compris des records déjà dus.
+
+Et il ne peut pas faire mieux : `BackOffHandler.onNextBackOff(container, exception, interval)`
+ne reçoit **pas le record**. Il n'a donc aucun moyen de savoir quelle partition suspendre.
+
+D'où le détour, qui est la seule vraie originalité du code de cette phase :
+`NotYetDueException` **porte sa `TopicPartition`**, et `PartitionPausingBackOffHandler` la lit
+pour appeler `pausePartition`. L'exception est le seul véhicule disponible entre le listener,
+qui connaît le record, et le handler de backoff, qui ne le connaît pas.
+
+Vérifié par test, avec l'assertion qui compte :
+
+```java
+verify(pauseService).pausePartition(container, RETRY_PARTITION, Duration.ofMillis(4000));
+verify(pauseService, never()).pause(any(MessageListenerContainer.class), any(Duration.class));
+```
+
+Le second `verify` est celui qui documente la trouvaille : sans lui, le test passerait aussi
+avec le handler du framework.
+
+---
+
 ## Ce que `@RetryableTopic` aurait fait
 
-L'annotation de spring-kafka câble exactement les mêmes briques :
+L'annotation de spring-kafka câble presque les mêmes briques :
 `ContainerPartitionPausingBackOffManager`, `KafkaBackoffAwareMessageListenerAdapter`,
-`DeadLetterPublishingRecovererFactory`. **En production, c'est ce qu'il faut utiliser.** Ici on
-l'a assemblé à la main pour trois raisons, dont une purement pratique :
+`DeadLetterPublishingRecovererFactory` — et c'est bien un *manager par partition* qu'elle
+utilise, là où le `BackOffHandler` exposé publiquement, lui, ne sait pas faire (voir juste
+au-dessus). **En production, c'est l'annotation qu'il faut utiliser.** Ici on l'a assemblée à
+la main pour trois raisons, dont une purement pratique :
 
 1. le mécanisme devient lisible — on peut pointer la ligne qui fait le retry, celle qui route
    vers la DLT, celle qui déduplique ;
@@ -308,6 +337,26 @@ Invoke-RestMethod "http://localhost:8095/admin/dlt?limit=10" | Format-Table offs
 ```powershell
 Invoke-RestMethod -Method Post -Uri "http://localhost:8095/admin/dlt/replay" -ContentType "application/json" -Body '{"topic":"shop.order.events.v1.dlt","partition":0,"offsets":[23]}'
 ```
+
+---
+
+## Ce que la revue de branche a corrigé
+
+Une relecture à contexte frais, après coup, a trouvé cinq choses qu'aucun test ne couvrait.
+Elles sont toutes du même genre : **un garde-fou qui vérifiait la forme et pas le fond.**
+
+| Trouvaille | Ce qu'elle permettait |
+|---|---|
+| `replay()` lisait jusqu'à la **fin du log** pour chaque offset demandé | La borne de 100 offsets ne protégeait rien : rejouer l'offset 5 d'une DLT de 50 000 records en chargeait 50 000, et le javadoc annonçait l'inverse. Lecture désormais bornée à la plage demandée, en **une seule passe**, et le rapport dit combien de records ont été lus. |
+| `x-origin-topic` était vérifié **présent**, pas **valide** | Un header valant la DLT elle-même faisait republier dedans : la même boucle infinie que le header absent, par un autre chemin. Et `DiagnosticHeaders` honorait un `x-origin-*` posé par le **producteur** même sur le topic métier, où il n'y a pas de passage précédent — donc un appelant pouvait choisir la destination d'un futur rejeu. |
+| `endOffsets()` sur une partition inexistante **attend** 60 s | Le contrôleur acceptait `partition` jusqu'à 1000 alors que les `.dlt` en ont une. Le thread HTTP bloquait une minute puis rendait 500 — le mode d'échec que le garde-fou sur les offsets existait justement pour supprimer. Partition vérifiée d'abord, et `default.api.timeout.ms` ramené à 10 s. |
+| `peek()` mélangeait les partitions, la vue n'en portait pas | Sur une DLT à plusieurs partitions, l'opérateur lit `offset=23` et devine la partition : le rejeu republie **un autre message** en annonçant `republished=1`. |
+| `stage-delays` est réglable, les listeners non | Trois délais configurés routaient vers `.retry-3`, topic inexistant : publication en échec, record rejoué en boucle — **une partition bloquée**, ce que cette phase supprime. Vérifié au démarrage désormais. |
+
+La leçon n'est pas « il fallait plus de tests ». Les cinq cas ont en commun d'être des
+**entrées que le code lisait sans les valider**, sur le chemin d'administration — celui qu'on
+écrit en dernier et qu'on teste le moins, alors que c'est le seul qui écrit dans un topic
+métier à la demande d'un humain.
 
 ---
 

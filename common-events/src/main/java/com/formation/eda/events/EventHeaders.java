@@ -15,7 +15,7 @@ package com.formation.eda.events;
  * autre langage lit ces noms sans rien connaitre de notre configuration Spring. Ce module n'a
  * d'ailleurs aucune dependance {@code kafka-clients} : on trouve donc ici les noms seuls, et
  * la lecture d'un {@code org.apache.kafka.common.header.Headers} dans
- * {@code com.formation.eda.kafka.reliability.RecordHeaders}.
+ * {@code com.formation.eda.kafka.reliability.HeaderReader}.
  *
  * <p>Deux familles, distinguees par le prefixe :
  * <ul>
