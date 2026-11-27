@@ -250,6 +250,51 @@ class DltReplayTest {
     }
 
     @Test
+    @DisplayName("les deux bouts d'une longue plage sont rejoues sans accumuler la plage")
+    void bothEndsOfALongSpanAreReplayedWithoutAccumulatingTheSpan() {
+        // La premiere correction bornait la PLAGE lue, pas la MEMOIRE : les records de `first` a
+        // `last` etaient accumules dans une liste avant d'etre filtres. Demander les offsets 0
+        // et 49 999 chargeait donc 50 000 records — la borne de 100 offsets ne protegeait
+        // toujours rien.
+        //
+        // La lecture est desormais STREAMING : chaque record est teste puis relache. Ce test ne
+        // peut pas observer l'allocation ; il garantit la correction du parcours, qui est ce
+        // qu'un refactor en streaming risque de casser (sortie anticipee, offsets manques).
+        long premier = putInDeadLetterTopic(orderPlaced(), Topics.ORDER_EVENTS, "cible debut");
+        long dernier = premier;
+        for (int i = 0; i < 40; i++) {
+            dernier = putInDeadLetterTopic(orderPlaced(), Topics.ORDER_EVENTS, "bruit " + i);
+        }
+
+        DltReplayService.ReplayReport report = replayService.replay(
+                new DltReplayService.ReplayRequest(
+                        Topics.ORDER_EVENTS_DLT, 0, List.of(premier, dernier)));
+
+        assertThat(report.republished()).isEqualTo(2);
+        assertThat(report.notFound()).isEmpty();
+        assertThat(report.rejected()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("le rejeu s'arrete des que tous les offsets demandes sont trouves")
+    void theReplayStopsAsSoonAsEveryRequestedOffsetIsFound() {
+        long premier = putInDeadLetterTopic(orderPlaced(), Topics.ORDER_EVENTS, "cible 1");
+        long second = putInDeadLetterTopic(orderPlaced(), Topics.ORDER_EVENTS, "cible 2");
+        for (int i = 0; i < 40; i++) {
+            putInDeadLetterTopic(orderPlaced(), Topics.ORDER_EVENTS, "bruit " + i);
+        }
+
+        DltReplayService.ReplayReport report = replayService.replay(
+                new DltReplayService.ReplayRequest(
+                        Topics.ORDER_EVENTS_DLT, 0, List.of(premier, second)));
+
+        assertThat(report.republished()).isEqualTo(2);
+        assertThat(report.scanned())
+                .as("records lus pour deux offsets voisins au debut d'une longue plage")
+                .isLessThanOrEqualTo(10);
+    }
+
+    @Test
     @DisplayName("une partition inconnue est refusee tout de suite, pas apres 60 s")
     void anUnknownPartitionIsRejectedImmediately() {
         // endOffsets() sur une partition inexistante attend default.api.timeout.ms (60 s) :

@@ -132,12 +132,12 @@ public class DltReplayService {
                 long from = Math.max(begin, end - remaining);
                 consumer.assign(List.of(partition));
                 consumer.seek(partition, from);
-                for (ConsumerRecord<String, byte[]> record : readRange(consumer, from, end)) {
-                    if (view.size() >= capped) {
-                        break;
-                    }
+                // Borne par `capped` (100 au plus) : la liste de vues est donc bornee par
+                // construction, contrairement au parcours de replay().
+                scanRange(consumer, from, end, record -> {
                     view.add(viewOf(record));
-                }
+                    return view.size() < capped;
+                });
             }
         }
         return view;
@@ -209,22 +209,26 @@ public class DltReplayService {
                 long first = reachable.get(0);
                 long last = reachable.get(reachable.size() - 1);
                 Set<Long> looking = new java.util.HashSet<>(reachable);
+                int[] done = new int[1];
 
                 consumer.seek(partition, first);
-                for (ConsumerRecord<String, byte[]> record : readRange(consumer, first, last + 1)) {
-                    scanned++;
+                // Traitement AU VOL, record par record : aucune accumulation. Une version
+                // precedente bornait la plage lue mais la collectait d'abord dans une liste —
+                // demander les offsets 0 et 49 999 chargeait les 50 000 records intermediaires,
+                // et la borne de 100 offsets ne protegeait donc toujours rien.
+                scanned = scanRange(consumer, first, last + 1, record -> {
                     if (!looking.remove(record.offset())) {
-                        continue;
+                        return true;
                     }
                     if (republish(record)) {
-                        republished++;
+                        done[0]++;
                     } else {
                         rejected.add(record.offset());
                     }
-                    if (looking.isEmpty()) {
-                        break;
-                    }
-                }
+                    // false = plus rien a chercher, on arrete le parcours.
+                    return !looking.isEmpty();
+                });
+                republished = done[0];
                 // Un offset compris dans les bornes mais jamais rendu : compacte, ou efface par
                 // la retention entre la lecture des bornes et la lecture du record.
                 notFound.addAll(looking);
@@ -309,16 +313,22 @@ public class DltReplayService {
     }
 
     /**
-     * Lit les records de {@code from} (inclus) a {@code toExclusive}, ou s'arrete sur deux polls
-     * vides.
+     * Parcourt les records de {@code from} (inclus) a {@code toExclusive} en appelant
+     * {@code visitor} sur chacun, et s'arrete des que celui-ci rend {@code false}, que la borne
+     * haute est atteinte, ou sur deux polls vides.
      *
-     * <p>WHY une borne haute explicite : la version precedente lisait jusqu'a la fin du log,
-     * quelle que soit la plage utile. Le cout d'un appel ne doit dependre que de ce qu'on a
-     * demande, pas de la taille du topic.
+     * <p><b>Rien n'est accumule.</b> Deux versions precedentes ont echoue sur ce point : la
+     * premiere lisait jusqu'a la fin du log quelle que soit la plage utile ; la seconde bornait
+     * la plage mais la collectait dans une liste avant de filtrer. Dans les deux cas, le cout en
+     * memoire d'un appel dependait de la taille du topic et non de ce qui avait ete demande —
+     * alors que c'est la seule protection que le controleur annonce.
+     *
+     * @param visitor rend {@code false} pour arreter le parcours
+     * @return le nombre de records parcourus
      */
-    private List<ConsumerRecord<String, byte[]>> readRange(KafkaConsumer<String, byte[]> consumer,
-                                                           long from, long toExclusive) {
-        List<ConsumerRecord<String, byte[]>> collected = new ArrayList<>();
+    private int scanRange(KafkaConsumer<String, byte[]> consumer, long from, long toExclusive,
+                          java.util.function.Predicate<ConsumerRecord<String, byte[]>> visitor) {
+        int scanned = 0;
         long highestSeen = from - 1;
         int emptyPolls = 0;
         while (emptyPolls < 2 && highestSeen < toExclusive - 1) {
@@ -330,13 +340,16 @@ public class DltReplayService {
             emptyPolls = 0;
             for (ConsumerRecord<String, byte[]> record : records) {
                 if (record.offset() >= toExclusive) {
-                    return collected;
+                    return scanned;
                 }
-                collected.add(record);
+                scanned++;
                 highestSeen = Math.max(highestSeen, record.offset());
+                if (!visitor.test(record)) {
+                    return scanned;
+                }
             }
         }
-        return collected;
+        return scanned;
     }
 
     private static List<TopicPartition> partitionsOf(KafkaConsumer<String, byte[]> consumer, String topic) {
